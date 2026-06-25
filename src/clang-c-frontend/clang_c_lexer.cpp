@@ -52,8 +52,8 @@ struct clang_c_lexert::LexerContext
   {
     lo.C17 = 1;
     lo.GNUMode = 1;
-    clang::TargetOptions target_opts;
-    target_opts.Triple = llvm::sys::getDefaultTargetTriple();
+    auto target_opts = std::make_shared<clang::TargetOptions>();
+    target_opts->Triple = llvm::sys::getDefaultTargetTriple();
     target_info.reset(clang::TargetInfo::CreateTargetInfo(diags, target_opts));
   }
 };
