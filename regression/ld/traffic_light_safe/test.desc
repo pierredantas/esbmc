@@ -1,0 +1,4 @@
+CORE
+traffic_light_safe.ld
+--ld-props props.yaml --k-induction --no-div-by-zero-check
+^VERIFICATION SUCCESSFUL$
