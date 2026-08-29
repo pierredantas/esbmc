@@ -1,10 +1,9 @@
 name: Master Coverage
 on:
-  # Nightly, not per-push: the run takes hours, and every push to master shared
-  # one `cancel-in-progress` concurrency group, so a later push killed it. 97 of
-  # the last 100 runs were cancelled and master went 8 days with no report.
-  schedule:
-    - cron: '0 2 * * *'
+  # Dispatch only on this fork. Upstream runs the nightly and publishes the report,
+  # so a fork repeating it spends four parallel shards for hours on a result nobody
+  # reads here. Restore the `schedule:` block if this fork ever needs its own.
+  #
   # Lets the sharded pipeline be re-run against a known commit, so its total
   # can be compared with a previous unsharded run rather than assumed correct.
   workflow_dispatch:
