@@ -64,6 +64,8 @@ jobs:
     name: Upload Release Asset
     runs-on: ubuntu-24.04
     needs: [build, build-info]
+    permissions:
+      contents: write
     steps:
       # The build jobs run with canon-names: true, so each platform already
       # uploaded its canonical esbmc-<platform>.zip; just fetch and attach them.
