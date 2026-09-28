@@ -14,7 +14,6 @@
 class python_converter;
 class type_handler;
 
-
 class dynamic_type_handler
 {
 public:
@@ -91,6 +90,11 @@ public:
     const locationt &location);
 
   /**
+   * @brief Builds unary minus on a tagged-scalar operand, as `0 - tagged`
+   */
+  exprt build_neg_tagged(const exprt &tagged);
+
+  /**
    * @brief Builds isinstance(tagged, type_name). `type_is_user_class` says
    * whether `type_name` names a class defined in the program, which a tag can
    * never hold
@@ -108,13 +112,25 @@ public:
   bool detect_dynamic_return_type(const nlohmann::json &function_body) const;
 
   /**
-   * @brief Builds a tagged-object temporary from an already-converted
-   * value, for use as a RETURN value
+   * @brief True if some top-level `If` in `scope_body` (a function body or
+   * the module body) assigns `name` genuinely incompatible literal kinds
+   * across every branch
    */
-  exprt build_tagged_return_value(
+  bool scope_assigns_divergent_literal_types(
+    const std::string &name,
+    const nlohmann::json &scope_body) const;
+
+  /**
+   * @brief Builds a tagged-object temporary from an already-converted
+   * value, for use as either a RETURN value or a function-call ARGUMENT
+   */
+  exprt build_tagged_value(
     const exprt &value,
     const locationt &location,
     codet &target_block);
+
+  /// Throws the shared "tagged argument, no known parameter type" refusal.
+  [[noreturn]] void refuse_tagged_argument() const;
 
   /**
    * @brief Whole-struct copy: fills `name`'s tagged-object symbol from a
@@ -180,6 +196,8 @@ private:
     const std::string &op,
     const exprt &tagged,
     const exprt &literal);
+  exprt
+  build_ordered_obj(const std::string &op, const exprt &lhs, const exprt &rhs);
   exprt build_add_literal(
     const exprt &tagged,
     const exprt &literal,
@@ -222,4 +240,3 @@ private:
   // point is surviving the join.
   std::unordered_map<std::string, std::string> aliases_;
 };
-

@@ -18,9 +18,9 @@ extern "C"
 
 #include <esbmc/bmc.h>
 #include <esbmc/esbmc_parseoptions.h>
-#include <goto-symex/goto_symex.h>
-#include <goto-symex/goto_trace.h>
-#include <goto-symex/sarif.h>
+#include <goto-symex/engine/goto_symex.h>
+#include <goto-symex/trace/goto_trace.h>
+#include <goto-symex/trace/sarif.h>
 #include <util/base/cwe_mapping.h>
 #include <solvers/smt/smt_result.h>
 #include <solvers/smtlib/smtlib_conv.h>
@@ -101,6 +101,26 @@ extern "C"
 #define CLR_BOLD "\033[1m"
 #define CLR_RESET "\033[0m"
 
+/// The forked k-induction processes each keep their own property table, and
+/// the one that concludes the run reports its base-case bound as PASSED (D4 of
+/// docs/roadmap/multi-property-strategy-plan.md). The other flags listed turn
+/// --multi-property on. --termination runs the sequential driver instead.
+static bool k_induction_parallel_conflicts(const cmdlinet &cmdline)
+{
+  if (!cmdline.isset("k-induction-parallel") || cmdline.isset("termination"))
+    return false;
+
+  for (const char *incompatible :
+       {"multi-property", "all-witnesses", "parallel-solving"})
+    if (cmdline.isset(incompatible))
+    {
+      log_error(
+        "--k-induction-parallel cannot be combined with --{}", incompatible);
+      return true;
+    }
+  return false;
+}
+
 /// The flag combinations that cannot produce a sound report, rejected
 /// before any work is done. Kept out of doit() so every combination check
 /// reads in one place.
@@ -173,6 +193,47 @@ static bool incompatible_flags(const cmdlinet &cmdline)
           "--dead-code-check cannot be combined with --{}", incompatible);
         return true;
       }
+
+  // Combined mode owns the whole pipeline: process_goto_program routes
+  // --loop-invariant into goto_loop_invariant_combined, which never reaches
+  // the synthesis pass, so the flag would be a silent no-op. Combined mode
+  // also ASSUMEs the invariant at the end of the body, and assuming a guess
+  // is exactly what synthesis must never do (a wrong candidate has to fail a
+  // claim, not license one). Reject rather than wire the two together.
+  if (
+    cmdline.isset("synthesise-loop-invariants") &&
+    cmdline.isset("loop-invariant"))
+  {
+    log_error(
+      "--synthesise-loop-invariants cannot be combined with --loop-invariant; "
+      "use --loop-invariant-check, which it implies");
+    return true;
+  }
+
+  // --termination havocs every loop head k-induction-style (goto_termination),
+  // and the standalone schema has already rewritten those heads: goto_loop_
+  // invariant uses insert_swap, which leaves the establishment ASSERT in the
+  // head's slot, and havoc_slot then aborts on `loop_head->is_goto()`
+  // (goto_k_induction.cpp). Composing the two would be meaningless even if it
+  // did not abort -- a loop the schema has cut no longer has the iteration
+  // behaviour --termination asks about.
+  //
+  // Combined mode is exempt, and so is --validate-correctness-witness, which
+  // routes to it: goto_loop_invariant_combined splices its verification branch
+  // *before* the head with destructive_insert, so the head is still the guard
+  // GOTO when goto_termination reaches it. Measured on an unbounded loop with
+  // a witness-injected loop invariant, where the ranking check does not
+  // short-circuit: the run completes.
+  for (const char *mode :
+       {"synthesise-loop-invariants", "loop-invariant-check"})
+    if (cmdline.isset(mode) && cmdline.isset("termination"))
+    {
+      log_error("--{} cannot be combined with --termination", mode);
+      return true;
+    }
+
+  if (k_induction_parallel_conflicts(cmdline))
+    return true;
 
   // --incremental-context-bound owns the outer verification loop, re-running
   // do_bmc per context bound; the unwinding strategies each drive an outer

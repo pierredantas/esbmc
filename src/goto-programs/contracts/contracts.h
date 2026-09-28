@@ -186,10 +186,19 @@ public:
   /// the #6483 carve-out. It is false for a nondet heap extent, which nothing
   /// may dereference. An absent map entry is a third state: the harness never
   /// allocated, so the pointer is the real caller's.
+  ///
+  /// \p from_is_fresh is narrower: true only when \p bytes came from the
+  /// contract's own __ESBMC_is_fresh(ptr, bytes) clause. The #6483 carve-out
+  /// entry is \p justified (real stack storage genuinely backs one element)
+  /// but NOT \p from_is_fresh (the contract never stated that extent) --
+  /// consumers that need the extent to match what the contract actually
+  /// claims, not just "some real memory happens to be there", must check
+  /// this instead of \p justified alone (#7057).
   struct param_extentt
   {
-    expr2tc bytes;  ///< Byte-extent expression of the allocation
-    bool justified; ///< True when the backing may be dereferenced
+    expr2tc bytes;              ///< Byte-extent expression of the allocation
+    bool justified;             ///< True when the backing may be dereferenced
+    bool from_is_fresh = false; ///< True only when bytes is from is_fresh
   };
 
   /// \brief Check if a function is compiler-generated and should be skipped.
@@ -380,6 +389,16 @@ private:
   {
     expr2tc original_expr; ///< Expression inside __ESBMC_old()
     expr2tc snapshot_var;  ///< Snapshot variable symbol
+
+    /// True for __ESBMC_old(ptr[j]) where ptr is a pointer parameter (not a
+    /// named array): original_expr is the pointer itself, snapshot_var
+    /// becomes an array-typed copy of its is_fresh'd extent (materialized by
+    /// a copy loop, not a single whole-value ASSIGN), and region_elem_type
+    /// is the element type. The index itself isn't stored here -- both
+    /// consumers (the copy loop, replace_old_in_expr) each already have
+    /// their own index expression in hand and never need this one. #7057.
+    bool is_ptr_region = false;
+    type2tc region_elem_type = type2tc(); ///< nil unless is_ptr_region
   };
 
   /// \brief Check if expression is an __ESBMC_old() call
@@ -397,6 +416,23 @@ private:
     const std::string &func_name,
     size_t index) const;
 
+  /// \brief The snapshot whose original_expr symbol matches \p thename and
+  /// whose is_ptr_region equals \p want_region, nil if none. #7057.
+  static expr2tc find_snapshot_by_symbol(
+    const irep_idt &thename,
+    const std::vector<old_snapshot_t> &snapshots,
+    bool want_region);
+
+  /// \brief __ESBMC_old(ptr[j]), ptr a pointer parameter: try the
+  /// dereference(add(typecast(old-temp-symbol), j)) shape
+  /// goto_sideeffects.cpp's lift produces for this case. Returns nil if \p
+  /// ptr_expr isn't this shape. #7057.
+  static expr2tc try_replace_ptr_region_old(
+    const type2tc &result_type,
+    const expr2tc &ptr_expr,
+    const std::vector<old_snapshot_t> &snapshots,
+    const namespacet &ns);
+
   /// \brief Replace __ESBMC_old() calls with snapshot variables
   /// \param expr Expression containing old() calls
   /// \param snapshots Vector of snapshot information
@@ -404,6 +440,19 @@ private:
   expr2tc replace_old_in_expr(
     const expr2tc &expr,
     const std::vector<old_snapshot_t> &snapshots) const;
+
+  /// \brief Does this old-temp's hoisted symbol appear under a
+  /// pointer-region dereference shape somewhere in the body? Sets
+  /// is_ptr_region/region_elem_type on each entry that does. #7057.
+  static void classify_ptr_region_snapshots(
+    std::vector<old_snapshot_t> &old_snapshots,
+    const goto_programt &function_body);
+
+  /// \brief Reject a pointer used both as a bare __ESBMC_old(ptr) and a
+  /// region __ESBMC_old(ptr[j]) in the same contract -- ambiguous to
+  /// materialize. #7057.
+  static void check_old_snapshot_pointer_ambiguity(
+    const std::vector<old_snapshot_t> &old_snapshots);
 
   /// \brief Collect old_snapshot assignments from function body
   /// \param function_body GOTO program to scan for old_snapshot sideeffects
@@ -532,32 +581,117 @@ private:
     goto_programt &wrapper,
     const locationt &location);
 
-  /// \brief Materialize old snapshots in wrapper function (enforce-contract mode)
-  /// Creates DECL and ASSIGN instructions for snapshot variables before function call
-  /// \param old_snapshots Vector of snapshots to materialize (modified in-place)
+  /// \brief Materialize one __ESBMC_old(ptr[j]) region snapshot: since there
+  /// is no array rvalue to read through the pointer in one whole-value
+  /// ASSIGN, this declares a new array-typed temp sized by ptr's
+  /// __ESBMC_is_fresh extent and fills it with a hand-built element-wise
+  /// copy loop. Extracted out of materialize_old_snapshots_at_wrapper's
+  /// region branch (#7057).
+  /// \param original_expr The pointer-typed expression being snapshotted --
+  ///   the callee's own parameter symbol in wrapper mode, or (call-site
+  ///   mode, #7057) the actual argument, which is commonly an array-decay
+  ///   expression (`address_of(index(x, 0))`) rather than a bare symbol;
+  ///   only a pointer TYPE is required, not a specific expr kind
+  /// \param region_elem_type The element type (possibly an unfollowed
+  ///   struct symbol reference; followed internally before use)
+  /// \param wrapper GOTO program to append the DECLs and copy loop to
+  /// \param func_name Function name for unique variable naming
+  /// \param location Source location for generated instructions
+  /// \param extent_bytes The pointer's is_fresh-stated byte extent, already
+  ///   resolved and validated by the caller (wrapper mode looks this up in
+  ///   param_extents itself; call-site mode resolves it via
+  ///   find_callsite_is_fresh_extent) -- this function only consumes it
+  /// \param snap_idx Index for unique naming among this function's snapshots
+  /// \return The new array-typed snapshot variable symbol
+  expr2tc materialize_ptr_region_old_snapshot(
+    const expr2tc &original_expr,
+    const type2tc &region_elem_type,
+    goto_programt &wrapper,
+    const std::string &func_name,
+    const locationt &location,
+    const expr2tc &extent_bytes,
+    size_t snap_idx) const;
+
+  /// \brief Materialize old snapshots in wrapper function (enforce-contract
+  /// mode) Creates DECL and ASSIGN instructions for snapshot variables before
+  /// function call. A region snapshot (__ESBMC_old(ptr[j]), ptr a pointer
+  /// parameter) instead gets a DECL for a new array-typed temp plus a
+  /// hand-built copy loop sized by param_extents, since there is no array
+  /// rvalue to read through the pointer in one ASSIGN (#7057). \param
+  /// old_snapshots Vector of snapshots to materialize (modified in-place)
   /// \param wrapper GOTO program to add snapshot instructions to
   /// \param func_name Function name for unique variable naming
   /// \param location Source location for generated instructions
+  /// \param param_extents Byte extent of each is_fresh'd pointer parameter,
+  ///   needed only for region snapshots
   void materialize_old_snapshots_at_wrapper(
     std::vector<old_snapshot_t> &old_snapshots,
     goto_programt &wrapper,
     const std::string &func_name,
-    const locationt &location) const;
+    const locationt &location,
+    const std::map<irep_idt, param_extentt> &param_extents) const;
 
   /// \brief Materialize old snapshots at call site (replace-call mode)
-  /// Creates DECL and ASSIGN instructions for snapshot variables at call location
-  /// \param old_snapshots Vector of snapshots from function body
+  /// Creates DECL and ASSIGN instructions for snapshot variables at call
+  /// location \param old_snapshots Vector of snapshots from function body
   /// \param function_symbol Function symbol for parameter substitution
+  /// \param function_body Callee's body, scanned for a matching
+  ///        __ESBMC_is_fresh(ptr, N) clause when a snapshot is a pointer
+  ///        region (#7057) -- unused otherwise.
+  /// \param requires_clause The already-parameter-substituted requires
+  ///        clause generate_replacement_at_call already has in hand,
+  ///        forwarded to find_callsite_is_fresh_extent to test whether a
+  ///        candidate is_fresh call is asserted unconditionally -- unused
+  ///        otherwise.
   /// \param actual_args Actual arguments at call site
   /// \param replacement GOTO program to add snapshot instructions to
   /// \param call_location Source location for generated instructions
-  /// \return Vector of call-site snapshots (with parameter substitution applied)
+  /// \return Vector of call-site snapshots (with parameter substitution
+  /// applied)
   std::vector<old_snapshot_t> materialize_old_snapshots_at_callsite(
     const std::vector<old_snapshot_t> &old_snapshots,
     const symbolt &function_symbol,
+    const goto_programt &function_body,
+    const expr2tc &requires_clause,
     const std::vector<expr2tc> &actual_args,
     goto_programt &replacement,
     const locationt &call_location) const;
+
+  /// \brief Find the __ESBMC_is_fresh(ptr, size) call in \p function_body
+  ///        whose ptr operand names \p target_param and which \p
+  ///        requires_clause asserts unconditionally, and return its size
+  ///        operand with \p params rebound to \p actual_args
+  /// Used by materialize_old_snapshots_at_callsite to give a pointer-region
+  /// __ESBMC_old(ptr[j]) snapshot a call-site-visible extent under
+  /// --replace-call-with-contract (#7057); the enforce-mode counterpart
+  /// (generate_checking_wrapper) instead reads this straight from
+  /// param_extents, built once when its wrapper allocates the pointer.
+  /// \param function_body Callee's body, scanned for the is_fresh call
+  /// \param target_param Bare parameter symbol to match ptr against, in the
+  ///        callee's own terms (pre-substitution)
+  /// \param requires_clause Already-substituted requires clause, tested via
+  ///        asserted_unconditionally so a guarded is_fresh (stating nothing
+  ///        on the branch that skips it) is not treated as a hard extent
+  /// \param params Callee's formal parameters
+  /// \param actual_args Actual arguments at this call site
+  /// \param out_size Set to the rebound size expression on success; left
+  ///        untouched otherwise. Only names matching a formal in \p params
+  ///        are rebound; anything else the size expression names (a global,
+  ///        a named constant) is deliberately left alone, since it is not
+  ///        scoped to the callee and already resolves identically at the
+  ///        call site.
+  /// \return True if exactly one matching, unconditional is_fresh call was
+  ///         found. Aborts, rather than returning, if more than one such
+  ///         call names \p target_param with genuinely different extents --
+  ///         see the definition for why silently picking one is exactly the
+  ///         defect this function exists to rule out.
+  bool find_callsite_is_fresh_extent(
+    const goto_programt &function_body,
+    const expr2tc &target_param,
+    const expr2tc &requires_clause,
+    const code_typet::argumentst &params,
+    const std::vector<expr2tc> &actual_args,
+    expr2tc &out_size) const;
 
   // ========== Type fixing for return value comparisons ==========
 
@@ -646,6 +780,16 @@ private:
   /// \param dest Destination goto program (wrapper body)
   /// \param location Location information
   void havoc_static_globals(goto_programt &dest, const locationt &location);
+
+  /// \brief Havoc the globals, but only for the entry harness
+  /// The wrapper doubles as the body real callers invoke, and havocking there
+  /// would discard the caller's state. With no caller, the globals still hold
+  /// their static initialisers while a caller could have written anything the
+  /// `requires` admits (#7356).
+  void havoc_globals_for_entry_harness(
+    goto_programt &dest,
+    const locationt &location,
+    bool is_entry_harness);
 
   /// \brief Allocate fresh malloc backing storage for all pointer parameters.
   /// Called in --function entry harness mode so that pointer params point to

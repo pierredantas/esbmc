@@ -2,11 +2,13 @@
 
 #include <util/lang/c_types.h>
 #include <util/irep/expr.h>
+#include <util/irep/std_types.h>
 #include <util/expr/expr_util.h>
 #include <util/irep/type.h>
 
 #include <nlohmann/json.hpp>
 
+#include <cctype>
 #include <map>
 #include <string>
 
@@ -57,11 +59,26 @@ struct TypeFlags
   bool has_int = false;
   bool has_bool = false;
   bool has_none = false;
+  /// A union member this tracker cannot represent -- a list, dict, class or any
+  /// other non-scalar. Set by update_type_flags_from_node for anything it does
+  /// not recognise, so select_widest_type can decline to narrow
+  /// (esbmc/esbmc#7872).
+  bool has_other = false;
 };
 
 class type_utils
 {
 public:
+  /// A parameter's id, preferring `#identifier`: frontends disagree on which
+  /// key holds it and only `#identifier` crosses the IREP2 seam
+  /// (clang_cpp_convert.cpp:2880 sets the plain key alone).
+  static const irep_idt &
+  argument_identifier(const code_typet::argumentt &argument)
+  {
+    return argument.get_identifier().empty() ? argument.identifier()
+                                             : argument.get_identifier();
+  }
+
   static bool is_builtin_type(const std::string &name)
   {
     return (
@@ -110,13 +127,22 @@ public:
     return consensus_func_to_type().at(name);
   }
 
+  /// True for the monomorphic collection builders in models/nondet.py
+  /// (`_nondet_list_int`, `_nondet_dict_str_float`, ...), which the
+  /// preprocessor substitutes for `nondet_list`/`nondet_dict`.
+  static bool is_nondet_collection_builder(const std::string &name)
+  {
+    return name.rfind("_nondet_list_", 0) == 0 ||
+           (name.rfind("_nondet_dict_", 0) == 0 && name != "_nondet_dict_size");
+  }
+
   static bool is_python_model_func(const std::string &name)
   {
     return (
       name == "ESBMC_range_next_" || name == "ESBMC_range_has_next_" ||
       name == "bit_length" || name == "conjugate" || name == "from_bytes" ||
       name == "to_bytes" || name == "randint" || name == "random" ||
-      name == "all");
+      name == "all" || is_nondet_collection_builder(name));
   }
 
   static bool is_python_exceptions(const std::string &name)
@@ -197,6 +223,15 @@ public:
     return (t.is_signedbv() || t.is_unsignedbv()) && get_cpp_type(t) == "char";
   }
 
+  // Distinguishes a `bytes` value from a numpy-style numeric array, so `+`
+  // routes to concatenation only for the former. Both share the same legacy
+  // `array of long_long_int_type` representation here
+  // (type_handler::get_typet's "bytes" branch).
+  static bool is_bytes_array(const typet &t)
+  {
+    return t.is_array() && get_cpp_type(t) == "bytes";
+  }
+
   static bool is_float_vs_char(const exprt &a, const exprt &b)
   {
     const auto &type_a = a.type();
@@ -226,6 +261,11 @@ public:
   static typet
   select_widest_type(const TypeFlags &flags, const typet &default_type)
   {
+    // A member outside the float/int/bool hierarchy has no place in it, so
+    // widening would pick a scalar for a union that is not one (#7872).
+    if (flags.has_other)
+      return default_type;
+
     if (flags.has_float)
       return double_type();
     if (flags.has_int)
@@ -255,9 +295,17 @@ public:
   {
     TypeFlags flags;
 
-    // Extract from left operand
+    // Extract from left operand. `|` is left-associative, so a chained union
+    // nests on the left: `int | bool | float` is
+    // BinOp(BinOp(int, bool), float).
     if (binop_node.contains("left"))
-      update_type_flags_from_node(binop_node["left"], flags);
+    {
+      const auto &left = binop_node["left"];
+      if (left["_type"] == "BinOp")
+        merge_type_flags(flags, extract_binop_union_types(left));
+      else
+        update_type_flags_from_node(left, flags);
+    }
 
     // Extract from right operand (may be nested BinOp for chained unions)
     if (binop_node.contains("right"))
@@ -325,6 +373,30 @@ public:
     return type_identifiers.find(name) != type_identifiers.end();
   }
 
+  /// Copies @p s to @p out with PEP 515 underscore separators removed.
+  /// Returns false when one is misplaced: a numeric string may carry a single
+  /// underscore between two digits, never leading, trailing or doubled.
+  static bool strip_pep515_underscores(const std::string &s, std::string &out)
+  {
+    out.clear();
+    out.reserve(s.size());
+    for (std::size_t i = 0; i < s.size(); i++)
+    {
+      if (s[i] != '_')
+      {
+        out.push_back(s[i]);
+        continue;
+      }
+      const bool between_digits =
+        i > 0 && i + 1 < s.size() &&
+        isdigit(static_cast<unsigned char>(s[i - 1])) &&
+        isdigit(static_cast<unsigned char>(s[i + 1]));
+      if (!between_digits)
+        return false;
+    }
+    return true;
+  }
+
 private:
   static void
   update_type_flags_from_node(const nlohmann::json &node, TypeFlags &flags)
@@ -340,6 +412,8 @@ private:
         flags.has_bool = true;
       else if (type_str == "None" || type_str == "NoneType")
         flags.has_none = true;
+      else
+        flags.has_other = true;
     }
     else if (
       node["_type"] == "Constant" && node.contains("value") &&
@@ -347,6 +421,8 @@ private:
     {
       flags.has_none = true;
     }
+    else
+      flags.has_other = true;
   }
 
   static void merge_type_flags(TypeFlags &dest, const TypeFlags &src)
@@ -355,12 +431,15 @@ private:
     dest.has_int = dest.has_int || src.has_int;
     dest.has_bool = dest.has_bool || src.has_bool;
     dest.has_none = dest.has_none || src.has_none;
+    dest.has_other = dest.has_other || src.has_other;
   }
 
   static const std::map<std::string, std::string> &consensus_func_to_type()
   {
+    // hash() -> bytes (Bytes32), matching models/consensus.py's real
+    // signature -- not the real Python builtin's int.
     static const std::map<std::string, std::string> func_to_type = {
-      {"hash", "uint256"}};
+      {"hash", "bytes"}};
     return func_to_type;
   }
 };

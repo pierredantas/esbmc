@@ -114,15 +114,15 @@ bool is_unstatable_shape(const expr2tc &expr)
   if (is_unknown2t(expr) || is_invalid2t(expr))
     return true;
 
-  if (!convertible_rounding_mode(expr))
+  // overflow2t::do_simplify()'s widened-operand-multiply shortcut (#7840)
+  // exists to keep the original double-width multiply away from the solver.
+  // Stating "the shortcut preserves the value" as an equality hands the
+  // checker's solver that exact multiply back -- the query the shortcut
+  // was written to avoid, with no budget above screening it out.
+  if (is_overflow2t(expr))
     return true;
 
-  // overflow_cast()'s lowering builds its upper bound as
-  // constant_int(2^bits - 1) in the *operand's* type (smt_overflow.cpp), which
-  // is unrepresentable and wraps to -1 when bits equals a signed operand's
-  // width. The run's own --ir encoding does not wrap, so the disagreement is
-  // with the bitvector encoding this check forces, not with the fold.
-  if (is_overflow_cast2t(expr))
+  if (!convertible_rounding_mode(expr))
     return true;
 
   // convert_terminal() asserts a fixedbv constant fits a uint64_t. --fixedbv
@@ -154,6 +154,22 @@ bool is_unstatable_shape(const expr2tc &expr)
          is_bv_type(expr->type);
 }
 
+/** An IEEE 754 binary interchange format: half, single, double or quad. A
+ *  solver may reject any other float sort outright -- the bundled Bitwuzla
+ *  aborts on bfloat16 and on long double under --32 -- and the pipeline never
+ *  asks it for one when the simplifier has already folded such a term away
+ *  (#7326). */
+bool is_interchange_float(const type2tc &type)
+{
+  if (!is_floatbv_type(type))
+    return true;
+  const floatbv_type2t &f = to_floatbv_type(type);
+  return (f.exponent == 5 && f.fraction == 10) ||
+         (f.exponent == 8 && f.fraction == 23) ||
+         (f.exponent == 11 && f.fraction == 52) ||
+         (f.exponent == 15 && f.fraction == 112);
+}
+
 bool has_unsupported_subexpr(const expr2tc &expr)
 {
   if (is_nil_expr(expr))
@@ -161,7 +177,8 @@ bool has_unsupported_subexpr(const expr2tc &expr)
 
   if (
     is_sideeffect2t(expr) || is_dereference2t(expr) || is_address_of2t(expr) ||
-    is_pointer_type(expr->type) || is_code_type(expr->type))
+    is_pointer_type(expr->type) || is_code_type(expr->type) ||
+    !is_interchange_float(expr->type))
     return true;
 
   if (is_unstatable_shape(expr))
@@ -489,7 +506,10 @@ void install_simplification_equivalence_check(
         verdict == simplification_equivalencet::skipped)
         return;
 
-      log_error(
+      /* One fold can be checked thousands of times, so report each distinct
+       * pair once and keep going: exiting on the first left the rest of a
+       * run's findings unreported (#7326). */
+      const std::string report = fmt::format(
         "{}\n  before: {}\n  after:  {}\n  where:  {}",
         verdict == simplification_equivalencet::differs
           ? "simplifier changed the meaning of an expression"
@@ -497,9 +517,13 @@ void install_simplification_equivalence_check(
         *before,
         *after,
         witness.empty() ? "(no free symbols)" : witness);
-      // Not abort(): it skips the stream flush, and this diagnostic is the
-      // entire point of the run.
-      exit(1);
+
+      ++simplification_check_stats::violations;
+      static std::mutex reported_mutex;
+      static std::set<std::string> reported;
+      const std::lock_guard<std::mutex> lock(reported_mutex);
+      if (reported.insert(report).second)
+        log_error("{}", report);
     });
 #else
   (void)ns;
@@ -511,6 +535,12 @@ simplification_check_scopet::~simplification_check_scopet()
 {
   simplification_check_stats::report();
   simplification_check::clear();
+#ifdef ENABLE_SIMPLIFIER_EQUIVALENCE_CHECK
+  /* Deferred to here so one run reports every violation it found. Not abort():
+   * it skips the stream flush, and the diagnostics are the point of the run. */
+  if (simplification_check_stats::violations.load())
+    exit(1);
+#endif
 }
 
 namespace simplification_check_stats
@@ -518,17 +548,20 @@ namespace simplification_check_stats
 std::atomic<unsigned long> proved{0};
 std::atomic<unsigned long> declined{0};
 std::atomic<unsigned long> ill_sorted{0};
+std::atomic<unsigned long> violations{0};
 
 void report()
 {
   const unsigned long p = proved.load();
   const unsigned long d = declined.load();
   const unsigned long i = ill_sorted.load();
+  const unsigned long v = violations.load();
   if (p || d)
     log_status(
-      "simplifier equivalence check: {} rewrites proved, {} declined{}",
+      "simplifier equivalence check: {} rewrites proved, {} declined{}{}",
       p,
       d,
-      i ? fmt::format(" ({} ill-sorted)", i) : std::string());
+      i ? fmt::format(" ({} ill-sorted)", i) : std::string(),
+      v ? fmt::format(", {} violated", v) : std::string());
 }
 } // namespace simplification_check_stats

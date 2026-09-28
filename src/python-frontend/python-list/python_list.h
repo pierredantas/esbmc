@@ -1,6 +1,7 @@
 #pragma once
 
 #include <nlohmann/json.hpp>
+#include <python-frontend/type/element_type_registry.h>
 #include <util/irep/type.h>
 #include <util/irep/expr.h>
 #include <util/symtab/symbol.h>
@@ -13,8 +14,6 @@ class symbolt;
 class python_converter;
 class type_handler;
 class codet;
-
-using TypeInfo = std::vector<std::pair<std::string, typet>>;
 
 struct list_elem_info
 {
@@ -71,7 +70,7 @@ public:
    * rejects negative sizes with ValueError before the unsigned cast.
    * @param size     Expression giving the number of elements (often symbolic).
    * @param fill_value Element value pushed on each iteration.
-   * @param elem_type  IRep2 type of @p fill_value, recorded in list_type_map.
+   * @param elem_type  IRep2 type of @p fill_value, recorded in the registry.
    */
   exprt build_symbolic_fill_list(
     const exprt &size,
@@ -350,33 +349,6 @@ public:
     const exprt &rhs,
     const nlohmann::json &element);
 
-  void add_type_info(
-    const std::string &list_symbol_id,
-    const std::string &elem_id,
-    const typet &elem_type)
-  {
-    list_type_map[list_symbol_id].push_back(std::make_pair(elem_id, elem_type));
-  }
-
-  static void
-  copy_type_info(const std::string &source_list, const std::string dest_list)
-  {
-    if (!list_type_map[source_list].empty())
-    {
-      list_type_map[dest_list] = list_type_map[source_list];
-    }
-  }
-
-  /**
-   * @brief Record a single element-type entry for a list in the static type
-   * map.
-   *
-   * @param list_symbol_id  Internal symbol identifier of the list.
-   * @param elem_id         Symbol identifier of the element, or empty when the
-   *                        type is inferred from an annotation rather than from
-   *                        a concrete element expression.
-   * @param elem_type       ESBMC type of the element.
-   */
   /// The declaring literal's elements for a variable-held list, or empty when
   /// the literal cannot be used.
   std::vector<exprt> literal_elems_for_variable_list(
@@ -384,44 +356,21 @@ public:
     const exprt &source_list);
 
   /// True when a list's declaring literal still describes its contents.
-  static bool literal_still_describes_list(
+  bool literal_still_describes_list(
     const exprt &source_list,
     size_t literal_elem_count);
 
   /// Element type recovered for a bare `list` parameter, or a nil type.
-  static typet bare_list_param_elem_type(
+  typet bare_list_param_elem_type(
     const nlohmann::json &param_node,
     const std::string &param_id,
     const typet &annotated);
-
-  static void add_type_info_entry(
-    const std::string &list_symbol_id,
-    const std::string &elem_id,
-    const typet &elem_type)
-  {
-    list_type_map[list_symbol_id].push_back(std::make_pair(elem_id, elem_type));
-  }
 
   /**
    * @brief Create an empty set
    * @return Expression representing the empty set
    */
   exprt get_empty_set();
-
-  /**
-   * Get the element type for a list at a given index.
-   * If index is not specified or out of bounds, returns the first element's
-   * type. Returns empty typet() if type information is not available.
-   */
-  static typet
-  get_list_element_type(const std::string &list_id, size_t index = 0);
-
-  /**
-   * Get the internal symbol id of the element stored at a given index.
-   * Returns an empty string when the list or index is not found.
-   */
-  static std::string
-  get_list_element_id(const std::string &list_id, size_t index);
 
   /**
    * @brief Convert generator expressions and list comprehensions to lists
@@ -462,26 +411,6 @@ public:
     bool string_safe = false);
 
   /**
-   * @brief Check if all elements in a list have the same type.
-   * For mixed int/float lists, returns double_type() (Python promotes int to
-   * float for comparisons). Throws for other mixed-type combinations.
-   * @param list_id The list identifier
-   * @param func_name The function name (for error messages)
-   * @return The common element type, double_type() for int/float mix, or
-   *         empty typet() when the list is unknown.
-   * @throws std::runtime_error if incompatible mixed types are detected
-   */
-  static typet check_homogeneous_list_types(
-    const std::string &list_id,
-    const std::string &func_name);
-
-  /**
-   * @brief Return true when the list contains both integer and float elements.
-   * Used to detect mixed-numeric lists that need special handling in min/max.
-   */
-  static bool has_mixed_numeric_types(const std::string &list_id);
-
-  /**
    * @brief Infer the element type of a list literal AST node, accounting for
    * the int->float promotion applied at construction.
    *
@@ -495,19 +424,6 @@ public:
    *         type otherwise, or an empty typet() when no element is available.
    */
   typet infer_literal_element_type(const nlohmann::json &list_literal);
-
-  /**
-   * @brief Non-throwing query for an all-numeric list's element type.
-   *
-   * Unlike check_homogeneous_list_types(), this never throws: it returns
-   * double_type() when the list mixes int and float (Python promotes int to
-   * float), the single shared integer type when every element is that same
-   * integer type, and an empty typet() when the list is unknown, empty, or
-   * holds any non-numeric element (or integers of differing widths). Used to
-   * type a dict-comprehension loop variable without relying on exceptions for
-   * control flow.
-   */
-  static typet numeric_element_type(const std::string &list_id);
 
   /**
    * @brief Build an inline min/max computation for a mixed int/float list.
@@ -641,46 +557,65 @@ public:
     const std::string &method_name);
 
   /**
-   * @brief Return the number of type entries recorded for a list.
+   * @brief The element byte width every recorded element of @p list_id shares,
+   *        or 0 when there is no single answer.
    *
-   * Provides a safe, bounded count of the elements stored in list_type_map
-   * for the given list identifier.
-   *
-   * @param list_id  The internal symbol identifier of the list (e.g.
-   *                 "c:main.py@42@F@main@lst").
-   * @return  Number of type entries in the map for this list, or 0 if the
-   *          list is unknown or was constructed with no recorded elements.
+   * The list models apply one copy length to every element, so a width is only
+   * usable when all of them agree. Scalars and tuples have one, both being
+   * stored inline; a pointer-stored element (a nested list, a dict) and mixed
+   * widths yield 0, which keeps the model on its symbolic o->size path.
+   * Distinct from build_shallow_copy_call, which reads only the last type-map
+   * entry.
    */
-  static size_t get_list_type_map_size(const std::string &list_id);
+  BigInt uniform_elem_size(const std::string &list_id) const;
 
-  /** Compute the type_flag and float_type_id for a list, using the same
-   *  encoding as __ESBMC_list_sort and __ESBMC_list_lt:
-   *    0 = all-integer, 1 = all-float, 2 = string, 3 = mixed int+float.
-   *  Only examines the element types recorded in list_type_map for list_id.
-   *  Note: currently only inspects a single list; for mixed-type comparisons
-   *  (e.g. int list vs float list) the caller should merge flags from both
-   *  operands. */
-  static void get_list_type_flags(
-    const std::string &list_id,
-    const type_handler &th,
-    int &type_flag,
-    size_t &float_type_id);
-
-  /**
-   * @brief Reverse the compile-time type-info vector for a list.
-   *
-   * Mirrors the runtime element reordering performed by
-   * __ESBMC_list_reverse, so that subsequent index-based type lookups
-   * (e.g. list[0]) continue to resolve to the correct element type
-   * after an in-place reversal.
-   *
-   * Has no effect if the list is unknown, empty, or contains only one
-   * element (those cases are already trivially reversed).
-   *
-   * @param list_id  The internal symbol identifier of the list (e.g.
-   *                 "c:main.py@42@F@main@lst").
+  /** Same, for a list reached as an expression: a non-symbol operand names no
+   *  list to look up, so it has no single width and yields 0.
    */
-  static void reverse_type_info(const std::string &list_id);
+  BigInt uniform_elem_size(const exprt &list) const;
+
+  // True when the list's recorded element types include a tagged scalar, whose
+  // payload width is per-element and symbolic (#7716).
+  bool has_tagged_elements(const exprt &list) const;
+
+  /// The recorded element type when it is a tagged scalar and the index is not
+  /// constant; otherwise the fallback (#7716 family).
+  typet tagged_elem_type_or(
+    const exprt &array,
+    bool constant_index,
+    const typet &fallback) const;
+
+  struct shallow_push_call
+  {
+    const symbolt *func;
+    exprt last_arg;
+  };
+
+  /** Shallow-push entry point for a copy of `src`. A list of tagged scalars
+   *  needs the bounded-copy variant, which reads its trailing argument as a
+   *  float_type_id rather than as an element width (#7716).
+   */
+  shallow_push_call
+  select_shallow_push(const exprt &src, const exprt &untagged_last_arg) const;
+
+  shallow_push_call
+  select_list_extend(const exprt &src, const exprt &untagged_elem_size) const;
+
+  struct list_eq_target
+  {
+    const symbolt *func;
+    std::vector<exprt> trailing_args;
+  };
+
+  /** Equality entry point for `l1 == l2` and the arguments that follow the two
+   *  list operands. A tagged element has no single static width and cannot hold
+   *  a nested list, so neither elem_size nor the depth stack applies (#7723).
+   */
+  list_eq_target select_list_eq(
+    const exprt &l1,
+    const exprt &l2,
+    const symbolt &generic_func,
+    const std::vector<exprt> &generic_trailing_args) const;
 
   /**
    * @brief Unpack a list variable into multiple targets, supporting starred
@@ -726,6 +661,25 @@ private:
 
   list_elem_info
   get_list_element_info(const nlohmann::json &op, const exprt &elem);
+
+  /// Refuses `dict.items()` against a set of tuples, whose pairs the
+  /// placeholder view does not model (#7553).
+  void reject_items_view_vs_tuple_set(
+    const exprt &lhs,
+    const exprt &rhs,
+    const exprt &converted_lhs,
+    const exprt &converted_rhs);
+
+  /// A constructed class instance arrives as a value struct; the element read
+  /// expects a reference. Box it so the two agree (#7685).
+  exprt as_object_reference(const nlohmann::json &op, const exprt &elem);
+
+  list_elem_info
+  get_tagged_element_info(const nlohmann::json &op, const exprt &elem);
+
+  // The type_id a tagged scalar carries when it holds a float, or 0 when the
+  // caller opts out of the float path (dict values compare via void*).
+  exprt tagged_float_type_id(bool enable_float_path) const;
 
   symbolt &create_list();
 
@@ -806,6 +760,42 @@ private:
   exprt
   handle_index_access(const exprt &array, const nlohmann::json &slice_node);
 
+  // True when `array` is a 2-D+ numpy array parameter's decayed pointer
+  // symbol (register_function_argument's row-pointer decay), i.e. one whose
+  // pre-decay shape handle_index_access's own negative-index normalization
+  // needs to consult in numpy_param_shapes_. Split out to keep that
+  // function's own decision count down.
+  bool is_numpy_param_negative_index_target(const exprt &array) const;
+
+  // handle_index_access's own index/negative-index resolution: normalizes
+  // pos_expr in place for a literal negative index (a[-1]) against the
+  // right size source for `array`'s shape (a numpy parameter's pre-decay
+  // shape, an array_typet's own size, or -- when neither applies -- deferred
+  // to build_list_at_call's runtime normalization), or sets `index` alone
+  // for a compile-time-only type lookup. A no-op for anything but a
+  // UnaryOp(USub)/Constant slice. Split out of handle_index_access to keep
+  // that function's own decision count down.
+  void normalize_index_access_position(
+    const exprt &array,
+    const nlohmann::json &slice_node,
+    const nlohmann::json &list_node,
+    exprt &pos_expr,
+    size_t &index) const;
+
+  /**
+   * @brief Resolve @c array[pos_expr] when the element is itself a list.
+   *
+   * Sets @p elem_type to the statically recorded element type whenever one
+   * exists. Returns the element expression when the nested-list path applies,
+   * and nullopt when the caller must fall through to the generic
+   * element-type resolution.
+   */
+  std::optional<exprt> resolve_nested_list_element(
+    const exprt &array,
+    const exprt &pos_expr,
+    size_t index,
+    typet &elem_type);
+
   /**
    * @brief Resolve an index expression against a compile-time-known axis
    * length, normalizing negative values and rejecting out-of-range indices.
@@ -833,9 +823,9 @@ private:
 
   exprt remove_function_calls_recursive(exprt &e, const nlohmann::json &node);
 
-  void copy_type_map_entries(
-    const std::string &from_list_id,
-    const std::string &to_list_id);
+  /// The converter-owned registry recording per-instance element types.
+  element_type_registry &elem_types();
+  const element_type_registry &elem_types() const;
 
   /**
    * @brief Append every element of src onto dst at runtime.
@@ -898,14 +888,4 @@ private:
 
   python_converter &converter_;
   const nlohmann::json &list_value_;
-
-  // <list_id, <elem_id, elem_type>>
-  static std::unordered_map<std::string, TypeInfo> list_type_map;
-
-  /// Element type already handed out for one syntactic pop() site, keyed by
-  /// list symbol and source position. The assignment path converts its RHS
-  /// more than once, and build_pop_list_call consumes a list_type_map entry
-  /// per call, so without this the second conversion of a single pop() sees an
-  /// empty map and falls back to the list's annotation (#4780).
-  static std::unordered_map<std::string, typet> pop_elem_type_memo;
 };

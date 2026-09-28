@@ -177,11 +177,6 @@ exprt tuple_handler::get_tuple_expr(const nlohmann::json &element)
   }
   exprt tuple_expr =
     migrate_expr_back(constant_struct2tc(migrate_type(tuple_type), members));
-  // Restore the full struct type: migrate_type does not model the frontend-only
-  // aggregate-kind marker set_python_aggregate_kind attaches, and the
-  // `in`/membership dispatch reads it (python_aggregate_kind) with no tag-based
-  // fallback for tuples. Re-attaching mirrors type_handler's lower_to_seam.
-  tuple_expr.type() = tuple_type;
 
   // Set location information
   if (element.contains("lineno"))
@@ -308,10 +303,7 @@ exprt tuple_handler::handle_tuple_subscript(
       elem_types.push_back(components[k].type());
     struct_typet new_type = create_tuple_struct_type(elem_types);
 
-    // V.3: build the sub-tuple value in IREP2, back-migrating once, then
-    // restore the full type -- migrate_type drops the frontend-only
-    // aggregate-kind marker read by the `in`/membership dispatch (see
-    // get_tuple_expr).
+    // V.3: build the sub-tuple value in IREP2, back-migrating once.
     std::vector<expr2tc> members;
     members.reserve(kept.size());
     for (size_t k : kept)
@@ -322,7 +314,6 @@ exprt tuple_handler::handle_tuple_subscript(
     }
     exprt result =
       migrate_expr_back(constant_struct2tc(migrate_type(new_type), members));
-    result.type() = new_type;
 
     if (element.contains("lineno"))
       result.location() = converter_.get_location_from_decl(element);
@@ -599,12 +590,36 @@ void tuple_handler::handle_tuple_unpacking(
 
     // Create member access: temp.element_i
     std::string member_name = "element_" + std::to_string(i);
-    exprt member_access =
-      build_member(rhs, member_name, tuple_type.components()[i].type());
+    const typet &member_type = tuple_type.components()[i].type();
+    exprt member_access = build_member(rhs, member_name, member_type);
+    const locationt loc = converter_.get_location_from_decl(ast_node);
+    const exprt target = build_symbol(*var_symbol);
+
+    // A tuple held in a list is reached through a dereference, and the
+    // dereference layer refuses to build a whole-array rvalue, as C does. A
+    // string element is such an array, so copy it element by element; its size
+    // is static, so the two are the same assignment (#7693).
+    if (
+      member_type.is_array() && to_array_type(member_type).size().is_constant())
+    {
+      const array_typet &arr_t = to_array_type(member_type);
+      const BigInt n =
+        binary2integer(to_constant_expr(arr_t.size()).value().c_str(), false);
+      for (BigInt k = 0; k < n; k = k + 1)
+      {
+        const exprt idx = from_integer(k, index_type());
+        code_assignt store(
+          build_index(target, idx, arr_t.subtype()),
+          build_index(member_access, idx, arr_t.subtype()));
+        store.location() = loc;
+        target_block.copy_to_operands(store);
+      }
+      continue;
+    }
 
     // Create assignment
-    code_assignt assign(build_symbol(*var_symbol), member_access);
-    assign.location() = converter_.get_location_from_decl(ast_node);
+    code_assignt assign(target, member_access);
+    assign.location() = loc;
     target_block.copy_to_operands(assign);
   }
 }

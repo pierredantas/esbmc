@@ -3,6 +3,7 @@
 #include <goto-programs/goto_convert_functions.h>
 #include <goto-programs/goto_inline.h>
 #include <goto-programs/remove_no_op.h>
+#include <util/irep/migrate.h>
 #include <util/arith/arith_tools.h>
 #include <util/expr/base_type.h>
 #include <util/lang/c_types.h>
@@ -33,6 +34,7 @@ void goto_convert_functionst::goto_convert()
   for (auto &it : symbol_list)
   {
     convert_function(*it);
+    migrate_type_back_cache_clear();
   }
 
   functions.compute_location_numbers();
@@ -109,6 +111,19 @@ static void stamp_value_locations(exprt &expr, const locationt &loc)
 
   Forall_operands (it, expr)
     stamp_value_locations(*it, loc);
+}
+
+// convert_expression() restores the statement's own location onto a
+// round-trip-stripped side effect before lowering it (goto_convert.cpp). The
+// mutable read materialises an empty #location, which the assignment then
+// replaces with the statement's -- nil included, and that is what
+// remove_function_call copies onto the FUNCTION_CALL it emits. Skipping it left
+// a generated call carrying an empty-but-present location where the round-trip
+// leaves it nil (esbmc/esbmc#6759).
+static void restore_sideeffect_location(exprt &op, const locationt &stmt)
+{
+  if (op.id() == "sideeffect" && op.location().get_file().empty())
+    op.location() = stmt;
 }
 
 // IREP2 value-level expressions carry no source location (only the
@@ -312,9 +327,7 @@ enum class assert_foldt
 // Reproduce generate_ifthenelse's assert-folds (goto_convert.cpp): a branch
 // that reduces to a lone `assert(false)` collapses into the guard instead of
 // emitting a conditional GOTO. A labelled assert is excluded throughout --
-// the label is a jump target, so the branch cannot collapse. Note the `||`
-// idiom fold DISCARDS the branch's second instruction; that is legacy
-// behaviour, reproduced deliberately.
+// the label is a jump target, so the branch cannot collapse.
 static bool is_lone_false_assert(const goto_programt &p)
 {
   return p.instructions.size() == 1 && p.instructions.back().is_assert() &&
@@ -324,6 +337,8 @@ static bool is_lone_false_assert(const goto_programt &p)
 
 // The `(void)((cond) || (assert(0),0))` idiom C libraries use. Legacy gates it
 // on the else-branch being observationally empty, not on there being no else.
+// The fold discards the trailing `0`, so it must be a no-op: code after a
+// failed assertion still runs when later claims are checked (#7900).
 static bool
 is_or_idiom(const goto_programt &then_p, const goto_programt &else_p)
 {
@@ -331,7 +346,7 @@ is_or_idiom(const goto_programt &then_p, const goto_programt &else_p)
          then_p.instructions.front().is_assert() &&
          is_false(then_p.instructions.front().guard) &&
          then_p.instructions.front().labels.empty() &&
-         then_p.instructions.back().labels.empty();
+         is_no_op(then_p, std::prev(then_p.instructions.end()));
 }
 
 static assert_foldt fold_assert_branches(
@@ -711,6 +726,8 @@ bool goto_convert_functionst::convert_native_rec(
         effective_location(expr_stmt.location, inherited);
       if (!stamp.get_file().empty())
         stamp_value_locations(op, stamp);
+
+      restore_sideeffect_location(op, expr_stmt.location);
 
       // convert_expression hands a side-effecting operand to remove_sideeffects
       // with result_is_used false, then emits an OTHER only if anything is left

@@ -4,12 +4,12 @@
 #include <goto-programs/dead_store_advisory.h>
 #include <goto-programs/goto_coverage.h>
 #include <goto-programs/property_verdict.h>
-#include <goto-symex/slice.h>
-#include <goto-symex/reachability_tree.h>
-#include <goto-symex/symex_target_equation.h>
-#include <goto-symex/witnesses.h>
-#include <goto-symex/pytest.h>
-#include <goto-symex/ctest.h>
+#include <goto-symex/equation/slice.h>
+#include <goto-symex/scheduler/reachability_tree.h>
+#include <goto-symex/equation/symex_target_equation.h>
+#include <goto-symex/witness/witnesses.h>
+#include <goto-symex/testgen/pytest.h>
+#include <goto-symex/testgen/ctest.h>
 #include <langapi/language_ui.h>
 #include <list>
 #include <map>
@@ -86,15 +86,35 @@ protected:
   // discharge was vacuous: the path assumptions alone are unsatisfiable.
   smt_resultt check_vacuity(symex_target_equationt &local_eq) const;
 
+  /// Whether the kept claim can hold at all on a feasible path.
+  smt_resultt check_claim_unsatisfiable(symex_target_equationt &local_eq) const;
+
+  /// Whether the invariant leaves one claim no way to hold (issue #7585).
+  bool invariant_refutes(const symex_target_equationt &eq, size_t claim_index);
+
   // Set by the vacuity probe when at least one kept claim discharged
   // vacuously; consulted by report_result to map the final verdict from
   // SUCCESSFUL to UNKNOWN. Atomic because multi_property_check writes from
   // parallel job threads.
   std::atomic<bool> vacuity_detected{false};
 
+  // Set when a violated claim was only violated downstream of a
+  // --loop-invariant-check havoc; consulted by report_result to map a verdict
+  // with no concrete violation from FAILED to UNKNOWN (issue #7480). Atomic
+  // because multi_property_check writes from parallel job threads.
+  std::atomic<bool> weak_invariant_detected{false};
+
   virtual void show_program(const symex_target_equationt &eq);
   virtual void report_success();
   virtual void report_failure();
+  /// Emit the verdict for a satisfiable run: FAILED, or UNKNOWN when every
+  /// violated claim was abstraction-derived (issue #7480).
+  void report_violation();
+
+  /// Set when the run printed UNKNOWN over a satisfiable result, so start_bmc
+  /// can return the exit code the verdict earns without misreporting what the
+  /// solver answered.
+  bool verdict_is_unknown = false;
   virtual void report_unknown();
   virtual void keep_alive_function() const;
 
@@ -193,15 +213,6 @@ private:
   /// silent, leaving the report to the phase that does.
   void report_property_verdicts(smt_resultt res) const;
 
-  /// Print the property table, grouped by file and function.
-  void print_property_rows(
-    const std::vector<struct property_rowt> &rows,
-    const struct property_countst &counts) const;
-
-  /// Print the "** N of M properties failed, ..." line.
-  void
-  print_property_summary(size_t total, const struct property_countst &) const;
-
   /// Render the verdict table as coverage goals rather than properties.
   void report_coverage_goal_verdicts(
     const std::map<std::string, property_resultt> &verdicts) const;
@@ -211,13 +222,25 @@ private:
   /// some phase happened to reach a verdict on (discussion #7023).
   void seed_property_verdicts(const symex_target_equationt &eq) const;
 
-  /// Record Failed for every assertion in \p eq that \p smt_conv's model
+  /// Record the verdict a satisfiable answer earns for one claim: Failed, or
+  /// Unknown when the model witnesses only the invariant abstraction rather
+  /// than a reachable state (issue #7480).
+  void record_satisfiable_claim(
+    const claim_slicer &claim,
+    const property_locationt &loc,
+    bool inductive_step,
+    symex_target_equationt &local_eq);
+
+  /// Record a verdict for every assertion in \p eq that \p smt_conv's model
   /// falsifies, so the report names them even when the counterexample itself
-  /// is suppressed. Call only where a SAT result witnesses a real violation:
-  /// an inductive-step or forward-condition model does not.
+  /// is suppressed. Failed, or Unknown for a claim the model reaches only past
+  /// a loop-invariant havoc, whose witness is the abstraction rather than a
+  /// reachable state (issue #7480). Call only where a SAT result can witness a
+  /// real violation at all: an inductive-step or forward-condition model
+  /// cannot.
   void record_violated_properties(
     smt_convt &smt_conv,
-    const symex_target_equationt &eq) const;
+    const symex_target_equationt &eq);
 
   /// Source files whose assertions come from ESBMC's own operational models,
   /// so the report can sort them after the user's code. Empty for Python,
@@ -235,6 +258,11 @@ private:
   /// assumed away rather than checked. Read by report_success(), which is
   /// otherwise the only place a user learns the run proved anything.
   bool saw_bounded_loop_truncation = false;
+
+  /// Whether this phase's UNSAT may be reported as a proof of the program: no
+  /// claim discharged vacuously, the LTL monitor instrumented, and, under a
+  /// k-step strategy, every row of the run's table Passed.
+  bool proves_the_program() const;
 
   /// Whether \p res establishes that *every* property holds, as opposed to a
   /// merely bounded round such as a k-induction base case. Must agree with the
@@ -271,6 +299,16 @@ private:
   /// Atomic because multi_property_check sets it from parallel job threads.
   std::atomic<bool> report_incomplete{false};
 };
+
+/// Print the property table a k-step strategy accumulated across its phases,
+/// once, where the strategy concludes without a phase of its own having
+/// reported (the k steps ran out). Rows the run never decided print as
+/// UNKNOWN: every base case checked them, none settled them. A no-op on a run
+/// that keeps a table per phase.
+void report_k_step_property_table(
+  const optionst &options,
+  const goto_functionst &goto_functions,
+  const namespacet &ns);
 
 void report_coverage(
   const optionst &options,

@@ -1,3 +1,4 @@
+#include <boost/algorithm/string/predicate.hpp>
 #include <python-frontend/converter/converter_internal.h>
 #include <python-frontend/math/convert_float_literal.h>
 #include <python-frontend/function_call/expr.h>
@@ -763,6 +764,19 @@ void set_dict_literal_element_type(
     element_type = dict_handler.get_dict_struct_type();
 }
 
+// A `dp[i] = v` / `dp[i] += v` shape. Such an assignment writes an element,
+// not the container, so container-level bookkeeping must sit it out.
+bool assignment_target_is_subscript(const nlohmann::json &ast_node)
+{
+  auto is_subscript = [](const nlohmann::json &t) {
+    return t.is_object() && t.value("_type", "") == "Subscript";
+  };
+  return (ast_node.contains("targets") && ast_node["targets"].is_array() &&
+          !ast_node["targets"].empty() &&
+          is_subscript(ast_node["targets"][0])) ||
+         (ast_node.contains("target") && is_subscript(ast_node["target"]));
+}
+
 bool is_same_name_assignment(
   const nlohmann::json &target,
   const nlohmann::json &ast_node)
@@ -909,6 +923,36 @@ bool is_imported_numpy_module_alias(
   return false;
 }
 
+// Converts a scalar RHS whose kind differs from the LHS's, returning whether
+// it did; both must run before Case 6, whose width alignment retypes the RHS
+// in place.
+// Case 5 (P19): a real RHS into a complex LHS is promoted. A complex struct is
+// 128-bit and a float 64-bit, so width alignment would otherwise corrupt the
+// float by assigning it the struct type. Handles z = 1.0, z = n, z = True.
+// Case 5b: a bool into an int or float LHS is a value conversion; retyped,
+// the constant `true` is read as a number and aborts in binary2integer.
+static bool convert_scalar_rhs(const typet &lhs_type, exprt &rhs)
+{
+  const typet rhs_type = rhs.type();
+  // is_bool() must be explicit since is_integer_type() excludes bool.
+  const bool is_real = rhs_type.is_floatbv() ||
+                       type_utils::is_integer_type(rhs_type) ||
+                       rhs_type.is_bool();
+  if (is_complex_type(lhs_type) && !is_complex_type(rhs_type) && is_real)
+  {
+    rhs = promote_to_complex(rhs);
+    return true;
+  }
+  if (
+    rhs_type.is_bool() &&
+    (lhs_type.is_floatbv() || type_utils::is_integer_type(lhs_type)))
+  {
+    rhs = typecast_exprt(rhs, lhs_type);
+    return true;
+  }
+  return false;
+}
+
 void python_converter::adjust_statement_types(exprt &lhs, exprt &rhs) const
 {
   typet &lhs_type = lhs.type();
@@ -1025,19 +1069,9 @@ void python_converter::adjust_statement_types(exprt &lhs, exprt &rhs) const
     if (!rhs_type.is_floatbv())
       rhs.type() = float_type;
   }
-  // Case 5 (P19): Promote real RHS to complex when LHS is complex.
-  // Must come BEFORE the width-alignment case: a complex struct is 128-bit
-  // while a scalar float is 64-bit, so width alignment would otherwise fire
-  // first and corrupt the float by assigning struct type to it.
-  // Handles: z = 1.0, z = n, z = True where z is declared as complex.
-  // Note: is_bool() must be explicit since is_integer_type() excludes bool.
-  else if (
-    is_complex_type(lhs_type) && !is_complex_type(rhs_type) &&
-    (rhs_type.is_floatbv() || type_utils::is_integer_type(rhs_type) ||
-     rhs_type.is_bool()))
-  {
-    rhs = promote_to_complex(rhs);
-  }
+  // Cases 5 and 5b: see convert_scalar_rhs.
+  else if (convert_scalar_rhs(lhs_type, rhs))
+    return;
   // Case 6: Align bit-widths between LHS and RHS if they differ. Never
   // "align" a tuple struct against a non-tuple: demoting the LHS symbol to
   // the scalar's type corrupts already-emitted tuple member reads (see the
@@ -1087,6 +1121,34 @@ static bool names_builtin(
   return !json_utils::is_class(spelling, ast);
 }
 
+static bool is_scalar_pointee(const typet &ptr)
+{
+  const typet &sub = ptr.subtype();
+  return sub.id() == "signedbv" || sub.id() == "unsignedbv" ||
+         sub.id() == "floatbv" || sub.id() == "fixedbv" || sub.is_bool();
+}
+
+/// The type of a Subscript annotation whose base names it only partly, or an
+/// empty type.
+typet python_converter::subscript_annotation_type(
+  const std::string &base,
+  const nlohmann::json &var_node)
+{
+  // Preserve concrete tuple element types for Tuple[...] annotations instead
+  // of resolving to the typing.Tuple class type.
+  if (base == "Tuple" || base == "tuple")
+    return get_type_from_annotation(var_node["annotation"], var_node);
+
+  // Optional[T] over a reference type is the T* a function returning it has,
+  // NULL for None; the bare "Optional" placeholder cannot hold None. A
+  // primitive T keeps the placeholder: its T* encoding cannot tell a zero
+  // value from None.
+  if (base != "Optional")
+    return typet();
+  typet t = get_type_from_annotation(var_node["annotation"], var_node);
+  return t.is_pointer() && !is_scalar_pointee(t) ? t : typet();
+}
+
 std::pair<std::string, typet>
 python_converter::extract_type_info(const nlohmann::json &var_node)
 {
@@ -1110,13 +1172,9 @@ python_converter::extract_type_info(const nlohmann::json &var_node)
         ann["value"]["_type"] == "Attribute" && ann["value"].contains("attr"))
         var_type_str = ann["value"]["attr"];
 
-      // Preserve concrete tuple element types for Tuple[...] annotations
-      // instead of resolving to the typing.Tuple class type.
-      if (var_type_str == "Tuple" || var_type_str == "tuple")
-      {
-        var_typet = get_type_from_annotation(ann, var_node);
-        return {var_type_str, var_typet};
-      }
+      if (typet t = subscript_annotation_type(var_type_str, var_node);
+          !t.id().empty())
+        return {var_type_str, t};
     }
     else if (
       ann.contains("_type") && ann["_type"] == "Attribute" &&
@@ -1170,7 +1228,10 @@ exprt python_converter::create_lhs_expression(
   if (target_type == "Attribute" || target_type == "Subscript")
   {
     is_converting_lhs = true;
+    const nlohmann::json *saved_store_target = lhs_store_target_;
+    lhs_store_target_ = &target;
     lhs = get_expr(target);
+    lhs_store_target_ = saved_store_target;
     is_converting_lhs = false;
   }
   else
@@ -1191,18 +1252,8 @@ void python_converter::handle_assignment_type_adjustments(
   const bool has_annotation =
     ast_node.contains("annotation") && !ast_node["annotation"].is_null();
 
-  // For subscript targets (e.g. dp[i] = v).
-  // The rhs writes an element, not the container.
-  // Don't rewrite lhs_symbol's type.
-  auto is_subscript_target = [](const nlohmann::json &t) {
-    return t.is_object() && t.value("_type", "") == "Subscript";
-  };
-  const bool target_is_subscript =
-    (ast_node.contains("targets") && ast_node["targets"].is_array() &&
-     !ast_node["targets"].empty() &&
-     is_subscript_target(ast_node["targets"][0])) ||
-    (ast_node.contains("target") && is_subscript_target(ast_node["target"]));
-  if (target_is_subscript)
+  // Don't rewrite lhs_symbol's type for a subscript target.
+  if (assignment_target_is_subscript(ast_node))
     return;
 
   // Assigning to a struct member (self.attr = value): an unannotated parameter
@@ -1230,7 +1281,7 @@ void python_converter::handle_assignment_type_adjustments(
   {
     rhs = address_of_exprt(rhs);
     if (lhs_symbol && !is_ctor_call)
-      lhs_symbol->set_value(rhs);
+      lhs_symbol->set_value(migrate_expr(rhs));
     return;
   }
 
@@ -1244,7 +1295,7 @@ void python_converter::handle_assignment_type_adjustments(
     rhs.type().subtype().is_code() &&
     !(lhs.type().is_pointer() && lhs.type().subtype().is_code()))
   {
-    lhs_symbol->set_type(rhs.type());
+    lhs_symbol->set_type(migrate_type(rhs.type()));
     lhs.type() = rhs.type();
   }
 
@@ -1264,10 +1315,10 @@ void python_converter::handle_assignment_type_adjustments(
     // Check if RHS is a tuple (has tuple tag pattern)
     if (rhs_struct.tag().as_string().find("tag-tuple") == 0)
     {
-      // Update symbol type from empty to concrete tuple type
-      lhs_symbol->set_type(rhs.type());
+      // Update symbol type from empty to concrete tuple type.
+      lhs_symbol->set_type(migrate_type(rhs.type()));
       lhs.type() = rhs.type();
-      lhs_symbol->set_value(rhs);
+      lhs_symbol->set_value(migrate_expr(rhs));
     }
   }
   else if (lhs_symbol)
@@ -1302,7 +1353,7 @@ void python_converter::handle_assignment_type_adjustments(
         // misread. Any is not a constraint, so adopt the rhs type. Only on
         // the first binding: a re-annotation (`x: Any = 5; ...; x: Any =
         // (1, 2)`) must not retype uses already emitted at the old type.
-        lhs_symbol->set_type(rhs.type());
+        lhs_symbol->set_type(migrate_type(rhs.type()));
         lhs.type() = rhs.type();
       }
       else if (!rhs.type().is_pointer() && !rhs.type().is_empty())
@@ -1318,7 +1369,7 @@ void python_converter::handle_assignment_type_adjustments(
         rhs = typecast_exprt(rhs, lhs.type());
       }
       if (!rhs.type().is_empty() && !is_ctor_call)
-        lhs_symbol->set_value(rhs);
+        lhs_symbol->set_value(migrate_expr(rhs));
       return;
     }
     // Handle string-to-string variable assignments
@@ -1330,7 +1381,7 @@ void python_converter::handle_assignment_type_adjustments(
         rhs_symbol->get_value().type().is_array())
       {
         rhs = rhs_symbol->get_value();
-        lhs_symbol->set_type(rhs.type());
+        lhs_symbol->set_type(migrate_type(rhs.type()));
         lhs.type() = rhs.type();
       }
     }
@@ -1392,7 +1443,7 @@ void python_converter::handle_assignment_type_adjustments(
             lhs_symbol->get_type() != type_handler_.get_list_type();
           if (!is_incompatible)
           {
-            lhs_symbol->set_type(rhs.type());
+            python_expr::set_symbol_type(*lhs_symbol, rhs.type());
             lhs.type() = rhs.type();
           }
         }
@@ -1410,7 +1461,7 @@ void python_converter::handle_assignment_type_adjustments(
       else
       {
         // Adjust pointer_type() to pointer_typet(empty_typet())
-        lhs_symbol->set_type(rhs.type());
+        lhs_symbol->set_type(migrate_type(rhs.type()));
         lhs.type() = rhs.type();
       }
     }
@@ -1438,13 +1489,27 @@ void python_converter::handle_assignment_type_adjustments(
       !(tuple_handler_->is_tuple_type(lhs_symbol->get_type()) &&
         !tuple_handler_->is_tuple_type(rhs.type())))
     {
-      lhs_symbol->set_type(rhs.type());
+      lhs_symbol->set_type(migrate_type(rhs.type()));
       lhs.type() = rhs.type();
     }
 
+    // Legacy: migrate_expr turns a class-object value (`x = int`) into an empty
+    // array constant, and isinstance folds on it
+    // (docs/roadmap/scope-python-irep2.md §10.4).
     if (!rhs.type().is_empty() && !is_ctor_call)
-      lhs_symbol->set_value(rhs);
+      set_assigned_value(*lhs_symbol, rhs);
   }
+}
+
+void python_converter::set_assigned_value(symbolt &symbol, const exprt &rhs)
+{
+  symbol.set_value(rhs);
+  // A class object is a char-array constant with its name in `value` and no
+  // operands.
+  if (rhs.is_constant() && rhs.operands().empty() && rhs.type().is_array())
+    class_object_names_[symbol.id] = rhs.get_string("value");
+  else
+    class_object_names_.erase(symbol.id);
 }
 
 void python_converter::handle_array_unpacking(
@@ -1798,6 +1863,19 @@ static bool json_literal_contains_boolean(const nlohmann::json &node)
   return false;
 }
 
+// `.shape[i]` indexes the plain int tuple `.shape` returns, never the
+// array's own data -- it must never be tracked as a numpy view/alias
+// (root_name_from_subscript drills through any Attribute to its base Name,
+// so without this guard `shape_0 = a.shape[0]` registers shape_0 as a view
+// copy of `a` itself). Split out of is_basic_numpy_view_subscript to keep
+// that function's own decision count down.
+static bool is_shape_attribute_value(const nlohmann::json &subscript_value)
+{
+  return subscript_value.is_object() &&
+         subscript_value.value("_type", "") == "Attribute" &&
+         subscript_value.value("attr", "") == "shape";
+}
+
 bool python_converter::is_basic_numpy_view_subscript(
   const nlohmann::json &node) const
 {
@@ -1845,6 +1923,14 @@ bool python_converter::is_basic_numpy_view_subscript(
   }
 
   return is_basic_index(slice);
+}
+
+bool python_converter::is_tracked_numpy_view_subscript(
+  const nlohmann::json &node) const
+{
+  return node.is_object() && node.contains("value") &&
+         !is_shape_attribute_value(node["value"]) &&
+         is_basic_numpy_view_subscript(node);
 }
 
 bool python_converter::is_numpy_array_constructor_expr(
@@ -1924,9 +2010,6 @@ python_converter::classify_numpy_method_call(
     method_base.value("_type", "") == "Name" && method_base.contains("id")
       ? method_base["id"].get<std::string>()
       : std::string();
-  const bool receiver_is_rewritable =
-    !method_base_is_imported_module(method_base_name) &&
-    method_base_is_tracked_numpy_array(method_base_name);
 
   // transpose()/reshape()/ravel() are view-like (see is_numpy_view_copy_expr,
   // which handles them separately); flatten()/sum()/mean()/min()/max()/
@@ -1945,7 +2028,55 @@ python_converter::classify_numpy_method_call(
     "prod",
     "std",
     "var",
-    "diagonal"};
+    "diagonal",
+    "argmin",
+    "argmax",
+    "argsort",
+    "searchsorted"};
+
+  // `np.eye(3).transpose()`: the receiver is itself a raw Call (a
+  // constructor, or a user function returning an array), not a Name bound
+  // to an already-tracked numpy array -- method_base_is_tracked_numpy_array
+  // can't recognise it at all. Every dispatch-rewrite method above is
+  // eligible for the rewrite itself: numpy_call_expr::
+  // try_hoist_call_arg_for_view_method either resolves the raw Call
+  // argument (transpose/flatten/ravel/sum/mean/min/max/argsort/
+  // searchsorted, whose Name-argument dispatch resolves through descriptor
+  // materialization and so also sees a temp that exists only in the GOTO
+  // IR), or -- for the rest, whose Name-argument dispatch walks the
+  // *source* AST instead (reshape's own resolve_numpy_var, prod/std/var/
+  // argmin/argmax's literal-only fallback, diagonal's pointer-view
+  // construction, none of which can see such a temp) -- raises a clean
+  // diagnostic rather than falling through to the pre-existing generic
+  // runtime-call fallback, which silently produced a wrong NONDET value
+  // for this shape (see numpy_call_expr.cpp for the full rationale).
+  //
+  // sum/max/min/mean and friends are not numpy-exclusive names: `Foo()` is
+  // syntactically the same Call shape as a plain function call, so without
+  // this guard `Foo().sum()` (a user class defining its own `sum` method)
+  // would be rewritten to `np.sum(Foo())` and never reach `Foo.sum`
+  // (issue caught in review). Excluding a call whose callee names a known
+  // class keeps the exact ambiguous case out while still allowing a plain
+  // function call (`make().sum()`) through -- get()'s own dispatch still
+  // declines/throws for a call that materialize/hoist can't resolve to a
+  // concrete array either way, so this is a precision improvement, not a
+  // soundness requirement on its own.
+  const bool receiver_is_call_to_known_class =
+    method_base.value("_type", "") == "Call" && method_base.contains("func") &&
+    method_base["func"].is_object() &&
+    method_base["func"].value("_type", std::string()) == "Name" &&
+    json_utils::is_class(
+      method_base["func"].value("id", std::string()), *ast_json);
+  const bool receiver_is_raw_call_view_method =
+    method_base.value("_type", "") == "Call" &&
+    !receiver_is_call_to_known_class &&
+    dispatch_rewrite_methods.count(method_name) != 0;
+
+  const bool receiver_is_rewritable =
+    !method_base_is_imported_module(method_base_name) &&
+    (method_base_is_tracked_numpy_array(method_base_name) ||
+     receiver_is_raw_call_view_method);
+
   const bool supported_dispatch_rewrite_method =
     receiver_is_rewritable && dispatch_rewrite_methods.count(method_name) != 0;
   const bool supported_copy_method =
@@ -2047,7 +2178,7 @@ bool python_converter::is_numpy_view_copy_expr(const nlohmann::json &node) const
   if (!node.is_object())
     return false;
 
-  if (is_basic_numpy_view_subscript(node))
+  if (is_tracked_numpy_view_subscript(node))
     return true;
 
   if (
@@ -2071,7 +2202,7 @@ std::string python_converter::root_name_from_numpy_view_copy_expr(
   if (!node.is_object())
     return "";
 
-  if (is_basic_numpy_view_subscript(node))
+  if (is_tracked_numpy_view_subscript(node))
     return root_name_from_subscript(node["value"]);
 
   if (
@@ -2105,7 +2236,7 @@ bool python_converter::is_tracked_numpy_view_name_node(
 bool python_converter::is_basic_numpy_view_subscript_escape(
   const nlohmann::json &node)
 {
-  if (!is_basic_numpy_view_subscript(node))
+  if (!is_tracked_numpy_view_subscript(node))
     return false;
 
   const std::string root_name = root_name_from_subscript(node["value"]);
@@ -2133,6 +2264,12 @@ bool python_converter::is_basic_numpy_view_subscript_escape(
   if (!root_is_numpy_view_source)
     return false;
 
+  const exprt probe = probe_expr(node);
+  return !contains_cpp_throw(probe) && probe.type().is_array();
+}
+
+exprt python_converter::probe_expr(const nlohmann::json &node)
+{
   code_blockt scratch_block;
   code_blockt *saved_block = current_block;
   exprt *saved_lhs = current_lhs;
@@ -2151,7 +2288,7 @@ bool python_converter::is_basic_numpy_view_subscript_escape(
   }
   current_block = saved_block;
   current_lhs = saved_lhs;
-  return !contains_cpp_throw(probe) && probe.type().is_array();
+  return probe;
 }
 
 bool python_converter::contains_tracked_numpy_view_object(
@@ -2434,6 +2571,14 @@ std::optional<std::vector<std::size_t>>
 python_converter::get_numpy_nditer_logical_shape(
   const std::string &root_id) const
 {
+  // A 2-D+ numpy array parameter: its own symbol type lost the outer
+  // dimension to the C-ABI row-pointer decay (register_function_argument),
+  // so the full shape must come from here rather than the fallback below,
+  // which would otherwise read the decayed (1-D) type instead.
+  if (auto param_it = numpy_param_shapes_.find(root_id);
+      param_it != numpy_param_shapes_.end())
+    return param_it->second;
+
   if (auto pointer_it = numpy_pointer_view_info_.find(root_id);
       pointer_it != numpy_pointer_view_info_.end())
     return std::vector<std::size_t>{pointer_it->second.length};
@@ -2442,20 +2587,46 @@ python_converter::get_numpy_nditer_logical_shape(
       reshape_it != numpy_reshape_view_info_.end())
     return reshape_it->second.view_shape;
 
-  auto transpose_it = numpy_transpose_view_info_.find(root_id);
-  if (transpose_it == numpy_transpose_view_info_.end())
+  if (auto transpose_it = numpy_transpose_view_info_.find(root_id);
+      transpose_it != numpy_transpose_view_info_.end())
+  {
+    const symbolt *source = symbol_table_.find_symbol(
+      resolve_numpy_array_storage_alias_id(transpose_it->second.source_id));
+    if (source == nullptr)
+      return std::nullopt;
+
+    const namespacet ns(symbol_table_);
+    std::vector<std::size_t> shape =
+      numpy_shape_from_type(ns, ns.follow(source->get_type()));
+    if (transpose_it->second.rank == 2 && transpose_it->second.swaps_axes)
+      std::reverse(shape.begin(), shape.end());
+    return shape;
+  }
+
+  // Fallback: no registered pointer/reshape/transpose view entry for this
+  // id (this also covers a plain ndarray and a view-copy tracked only via
+  // numpy_view_copy_sources_, both of which still carry their own concrete
+  // array_typet). Derive shape straight from that type, the same way every
+  // view branch above eventually does for its source. This is what lets
+  // .tolist()/.any()/.all() reuse the exact same descriptor materialization
+  // path for a bare `np.array(...)` instead of needing one of their own.
+  // Rank is capped at 2 to match that path's own scope -- without it, a
+  // 3-D+ array would get a shape here instead of declining, and reach the
+  // descriptor path's "rank 1 or 2" rejection instead of this family's own
+  // "constant numeric inputs only" one (regression/numpy/
+  // sum_constructor_non_numeric_fail pins the latter).
+  if (numpy_array_symbols_.count(root_id) == 0)
     return std::nullopt;
 
-  const symbolt *source = symbol_table_.find_symbol(
-    resolve_numpy_array_storage_alias_id(transpose_it->second.source_id));
-  if (source == nullptr)
+  const symbolt *plain = symbol_table_.find_symbol(root_id);
+  if (plain == nullptr)
     return std::nullopt;
 
   const namespacet ns(symbol_table_);
   std::vector<std::size_t> shape =
-    numpy_shape_from_type(ns, ns.follow(source->get_type()));
-  if (transpose_it->second.rank == 2 && transpose_it->second.swaps_axes)
-    std::reverse(shape.begin(), shape.end());
+    numpy_shape_from_type(ns, ns.follow(plain->get_type()));
+  if (shape.empty() || shape.size() > 2)
+    return std::nullopt;
   return shape;
 }
 
@@ -2780,23 +2951,67 @@ nlohmann::json python_converter::substitute_call_arguments(
   return node;
 }
 
-bool python_converter::return_value_uses_call_argument(
-  const nlohmann::json &return_value,
-  const nlohmann::json &call_node) const
+// Recursively checks that every Name leaf in `node` satisfies `name_is_safe`
+// -- used to decide whether a return expression built around a call (e.g.
+// `np.transpose(a)`) is safe to substitute wholesale: substitute_call_arguments
+// only ever rewrites a Name matching a parameter, so anything else it would
+// leave untouched (a module alias, a literal) must resolve correctly in the
+// caller's own scope for the substituted tree to mean the same thing there.
+static bool expr_only_references_safe_names(
+  const nlohmann::json &node,
+  const std::function<bool(const std::string &)> &name_is_safe)
+{
+  if (node.is_object())
+  {
+    if (node.value("_type", "") == "Name" && node.contains("id"))
+      return name_is_safe(node["id"].get<std::string>());
+    for (auto it = node.begin(); it != node.end(); ++it)
+      if (!expr_only_references_safe_names(it.value(), name_is_safe))
+        return false;
+    return true;
+  }
+  if (node.is_array())
+  {
+    for (const auto &elem : node)
+      if (!expr_only_references_safe_names(elem, name_is_safe))
+        return false;
+  }
+  return true;
+}
+
+// Resolves call_node to its callee's FunctionDef node, or an empty json when
+// it isn't a plain `name(...)` call to a locally-defined function with a
+// concrete parameter list. Split out of return_value_uses_call_argument to
+// keep that function's own decision count down.
+static nlohmann::json resolve_func_node_with_params(
+  const nlohmann::json &call_node,
+  const nlohmann::json &ast_body)
 {
   if (
     !call_node.is_object() || call_node.value("_type", "") != "Call" ||
     !call_node.contains("func") ||
     call_node["func"].value("_type", "") != "Name")
-    return false;
+    return nlohmann::json();
 
   const std::string func_name = call_node["func"]["id"].get<std::string>();
   const nlohmann::json func_node =
-    json_utils::try_find_function((*ast_json)["body"], func_name);
+    json_utils::try_find_function(ast_body, func_name);
   if (
     func_node.empty() || !func_node.contains("args") ||
     !func_node["args"].contains("args") ||
     !func_node["args"]["args"].is_array())
+    return nlohmann::json();
+
+  return func_node;
+}
+
+bool python_converter::return_value_uses_call_argument(
+  const nlohmann::json &return_value,
+  const nlohmann::json &call_node) const
+{
+  const nlohmann::json func_node =
+    resolve_func_node_with_params(call_node, (*ast_json)["body"]);
+  if (func_node.empty())
     return false;
 
   auto is_param_name = [&](const nlohmann::json &node) {
@@ -2812,8 +3027,76 @@ bool python_converter::return_value_uses_call_argument(
   if (is_param_name(return_value))
     return true;
 
-  return return_value.value("_type", "") == "Subscript" &&
-         return_value.contains("value") && is_param_name(return_value["value"]);
+  if (
+    return_value.value("_type", "") == "Subscript" &&
+    return_value.contains("value") && is_param_name(return_value["value"]))
+    return true;
+
+  // return <call>(<param>, ...): e.g. `def transposed(a): return
+  // np.transpose(a)`. Split out to keep this function's own decision count
+  // down; see that method for why this shape is safe to substitute too.
+  if (return_value.value("_type", "") == "Call")
+    return return_call_only_references_params_or_modules(
+      return_value, func_node["args"]["args"]);
+
+  return false;
+}
+
+// True when `alias` is bound by a top-level `import ... as alias` (or a bare
+// `import alias`) in the module's own body. imported_modules is a single
+// flat, program-wide map -- it also holds aliases bound by an import nested
+// inside some OTHER function's body (convert_module_imports hoists those
+// into the same map), which are not actually in scope wherever a substituted
+// return value ends up spliced into. Restricting to module-level imports
+// matches the idiomatic `import numpy as np` at the top of the file, which
+// is visible everywhere.
+static bool is_module_level_import_alias(
+  const nlohmann::json &ast_body,
+  const std::string &alias)
+{
+  for (const auto &stmt : ast_body)
+  {
+    if (stmt.value("_type", "") != "Import" || !stmt.contains("names"))
+      continue;
+    for (const auto &name : stmt["names"])
+    {
+      // A plain `import math` (no `as`) carries "asname": null -- present,
+      // not absent -- so name.value("asname", fallback) throws instead of
+      // using the fallback (nlohmann::json::value() only substitutes a
+      // default for a MISSING key, not a null one). Check is_string()
+      // explicitly rather than relying on the default-value overload.
+      const bool has_asname =
+        name.contains("asname") && name["asname"].is_string();
+      const std::string bound_name = has_asname
+                                       ? name["asname"].get<std::string>()
+                                       : name.value("name", std::string());
+      if (bound_name == alias)
+        return true;
+    }
+  }
+  return false;
+}
+
+bool python_converter::return_call_only_references_params_or_modules(
+  const nlohmann::json &return_value,
+  const nlohmann::json &params) const
+{
+  // Safe to substitute under the same reasoning as the bare-param/subscript
+  // cases in return_value_uses_call_argument as long as every Name the call
+  // expression references is either a parameter (substituted) or an
+  // imported module alias (left as-is, and resolved identically in the
+  // caller's own scope).
+  auto name_is_safe = [&](const std::string &name) {
+    if (
+      imported_modules.find(name) != imported_modules.end() &&
+      is_module_level_import_alias((*ast_json)["body"], name))
+      return true;
+    for (const auto &param : params)
+      if (param.value("arg", "") == name)
+        return true;
+    return false;
+  };
+  return expr_only_references_safe_names(return_value, name_is_safe);
 }
 
 /// Item assignment on an immutable container is a TypeError. A string that is
@@ -3554,10 +3837,30 @@ void python_converter::update_numpy_array_binding(
   if (unconditional_assignment || numpy_view_copy_sources_.count(lhs_id) == 0)
     clear_numpy_view_copy(lhs);
 
-  if (is_numpy_array_constructor_expr(rhs_node))
+  // `y = identity(x)`: a call to a locally-defined function returning a numpy
+  // array used to fall through to the erase below -- registering `y`'s type
+  // correctly as an array (Commit 4's own array-return fix) but leaving it
+  // untracked for method-form dispatch, so `y.tolist()`/`y.sum()` misread as
+  // a call to an undefined function named "tolist"/"sum".
+  if (
+    is_numpy_array_constructor_expr(rhs_node) ||
+    is_array_returning_call_expr(rhs_node, lhs))
     numpy_array_symbols_.insert(lhs_id);
   else
     numpy_array_symbols_.erase(lhs_id);
+}
+
+bool python_converter::is_array_returning_call_expr(
+  const nlohmann::json &rhs_node,
+  const exprt &lhs) const
+{
+  // A Python str is also represented as a (char) array, so array-ness alone
+  // is not numpy-ness: `def greet(): return "hi"` must not register `s` in
+  // numpy_array_symbols_, or `s.tolist()` would misdispatch to the ndarray
+  // method model instead of failing as the string method it isn't.
+  const typet &lhs_type = ns.follow(lhs.type());
+  return rhs_node.value("_type", "") == "Call" && lhs_type.is_array() &&
+         !type_handler_.is_string_type(lhs_type);
 }
 
 bool python_converter::record_numpy_view_copy_from_returned_argument(
@@ -3904,6 +4207,71 @@ typet python_converter::resolve_call_argument_array_type(
   return probed_type;
 }
 
+typet python_converter::resolve_numpy_reducer_call_array_type(
+  const nlohmann::json &ast_node,
+  const typet &current_type)
+{
+  if (ast_node["value"].is_null())
+    return current_type;
+
+  const nlohmann::json &call_node = ast_node["value"];
+  if (
+    call_node.value("_type", "") != "Call" ||
+    call_node["func"].value("_type", "") != "Attribute" ||
+    call_node["func"]["value"].value("_type", "") != "Name")
+    return current_type;
+
+  // sum/mean/min/max/argmin/argmax's numpy.py signature necessarily declares
+  // -> Any (its real shape is data-dependent: scalar when flattened, array
+  // along an axis), so the static annotator's guess for a np.<reducer>(...)
+  // call carrying axis= is unreliable -- sometimes Any (void*), sometimes a
+  // plain scalar type inferred from the input literal's element type -- and
+  // either one boxes/truncates the genuinely concrete array numpy_call_expr's
+  // axis-aware fast paths compute. An axis= keyword is only ever legal on
+  // these functions and only ever produces (on success) a 1-D array result,
+  // so it is safe to always trust a probe of the real call over the guess.
+  static const std::set<std::string> axis_aware_reducers = {
+    "sum", "prod", "mean", "min", "max", "argmin", "argmax"};
+  if (axis_aware_reducers.count(call_node["func"].value("attr", "")) == 0)
+    return current_type;
+
+  bool has_axis_keyword = false;
+  for (const auto &kw : call_node.value("keywords", nlohmann::json::array()))
+    if (kw.value("arg", "") == "axis")
+      has_axis_keyword = true;
+  if (!has_axis_keyword)
+    return current_type;
+
+  // imported_modules maps an alias ("np") to the resolved operational-model
+  // file it was imported from, not the bare module name -- mirrors
+  // function_call_builder::is_numpy_call's own filename check.
+  const std::string module_alias =
+    call_node["func"]["value"]["id"].get<std::string>();
+  auto module_it = imported_modules.find(module_alias);
+  if (
+    module_it == imported_modules.end() ||
+    !boost::algorithm::ends_with(module_it->second, "/models/numpy.py"))
+    return current_type;
+
+  is_converting_rhs = true;
+  in_rhs_type_probe_ = true;
+  exprt call_probe = get_expr(call_node);
+  in_rhs_type_probe_ = false;
+  is_converting_rhs = false;
+  if (contains_cpp_throw(call_probe))
+    return current_type;
+
+  const typet probed_type = ns.follow(call_probe.type());
+  if (probed_type.is_empty() || probed_type == any_type())
+    return current_type;
+
+  any_subscript_array_needs_copy_ = !call_probe.is_symbol();
+  cached_any_subscript_rhs_ = call_probe;
+  has_cached_any_subscript_rhs_ = true;
+
+  return probed_type;
+}
+
 bool python_converter::handle_unpacking_assignment(
   const nlohmann::json &ast_node,
   const nlohmann::json &target,
@@ -4177,9 +4545,14 @@ symbolt *python_converter::create_symbol_for_unannotated_assign(
     // If the expression is itself invalid — e.g. accessing a non-existent
     // attribute — get_expr will raise the correct, precise error at the
     // point of access rather than the misleading "Type undefined" later.
+    // Probed through rewrite_assign_rhs_node the same way the real
+    // conversion further down is, so a `.T` on a non-Name base (already
+    // rewritten to `np.transpose(...)` there) doesn't fail this probe on
+    // the original, unrewritten Attribute node before the real pass ever
+    // runs.
     is_converting_rhs = true;
     in_rhs_type_probe_ = true;
-    exprt rhs_expr = get_expr(ast_node["value"]);
+    exprt rhs_expr = get_expr(rewrite_assign_rhs_node(ast_node)["value"]);
     in_rhs_type_probe_ = false;
     is_converting_rhs = false;
 
@@ -4215,21 +4588,15 @@ ast_node_name(const nlohmann::json &node, const std::string &fallback = "")
 /// one of src's entries has the same type. sorted()/reversed() permute their
 /// argument, so a per-position copy would misattribute the elements of a
 /// heterogeneous list; a homogeneous one is permutation-invariant.
-static void
-copy_homogeneous_elem_types(const std::string &src, const std::string &dest)
+static void copy_homogeneous_elem_types(
+  element_type_registry &registry,
+  const std::string &src,
+  const std::string &dest)
 {
-  const size_t n = python_list::get_list_type_map_size(src);
-  if (n == 0)
+  if (registry.uniform_element_type(src).is_nil())
     return;
 
-  const typet first = python_list::get_list_element_type(src, 0);
-  if (first.is_nil())
-    return;
-  for (size_t i = 1; i < n; ++i)
-    if (python_list::get_list_element_type(src, i) != first)
-      return;
-
-  python_list::copy_type_info(src, dest);
+  registry.assign_from(src, dest);
 }
 
 /// sorted()/reversed()/list() reorder or copy their argument, they do not
@@ -4272,7 +4639,8 @@ void python_converter::copy_elem_types_from_reordering_builtin(
   {
     symbol_id arg_sid = create_symbol_id();
     arg_sid.set_object(arg["id"].get<std::string>());
-    copy_homogeneous_elem_types(arg_sid.to_string(), lhs_id);
+    copy_homogeneous_elem_types(
+      element_type_registry_, arg_sid.to_string(), lhs_id);
     return;
   }
 
@@ -4296,7 +4664,7 @@ void python_converter::copy_elem_types_from_reordering_builtin(
   const std::string dict_id = dict_sid.to_string();
   const std::string &src =
     python_dict_handler::get_internal_list_id(dict_id, component == "keys");
-  copy_homogeneous_elem_types(src, lhs_id);
+  copy_homogeneous_elem_types(element_type_registry_, src, lhs_id);
 }
 
 void python_converter::handle_function_call_rhs(
@@ -4385,7 +4753,7 @@ void python_converter::handle_function_call_rhs(
     is_user_class_pointer(rhs.type()) && is_user_class_struct_type(lhs.type()))
   {
     lhs.type() = rhs.type();
-    lhs_symbol->set_type(rhs.type());
+    lhs_symbol->set_type(migrate_type(rhs.type()));
   }
 
   // Set return destination
@@ -4402,17 +4770,17 @@ void python_converter::handle_function_call_rhs(
     if (auto ret = get_return_from_func(rhs.op1().identifier().c_str());
         !ret.is_nil())
     {
-      python_list::copy_type_info(
+      element_type_registry_.assign_from(
         ret.op0().identifier().as_string(), lhs.identifier().as_string());
     }
 
-    // If list_type_map is still empty for the LHS
+    // If nothing is recorded for the LHS yet
     // e.g. the list was passed through as a parameter inside the function,
     // fall back to the called function's return-type annotation
     // to determine the element type.
     const std::string &lhs_id = lhs.identifier().as_string();
     copy_elem_types_from_reordering_builtin(ast_node, lhs_id);
-    if (python_list::get_list_type_map_size(lhs_id) == 0)
+    if (element_type_registry_.size(lhs_id) == 0)
     {
       std::string func_name;
       if (
@@ -4457,7 +4825,7 @@ void python_converter::handle_function_call_rhs(
                   returns["slice"]["id"].get<std::string>());
                 if (elem_type != typet())
                 {
-                  python_list::add_type_info_entry(
+                  element_type_registry_.record(
                     lhs_id, std::string(), elem_type);
                 }
               }
@@ -5190,6 +5558,107 @@ python_converter::rewrite_assign_rhs_node(const nlohmann::json &ast_node) const
   return effective_ast_node;
 }
 
+void python_converter::propagate_dict_member_list_type_info(
+  const exprt &rhs,
+  const std::string &lhs_identifier)
+{
+  const exprt &dict_sym = rhs.op0();
+  // get_component_name() returns an irep_idt by value; bind the string
+  // by value so it is copied out before that temporary is destroyed
+  // (GCC -Wdangling-reference under -Werror).
+  const std::string component =
+    to_member_expr(rhs).get_component_name().as_string();
+  if (!dict_sym.is_symbol() || (component != "keys" && component != "values"))
+    return;
+
+  const std::string &dict_id = dict_sym.identifier().as_string();
+  const std::string &src =
+    python_dict_handler::get_internal_list_id(dict_id, component == "keys");
+  if (src.empty())
+    return;
+
+  element_type_registry_.assign_from(src, lhs_identifier);
+
+  // Tuple values are recorded under the $dict_value_types$ key, not the
+  // values-list id (github_3719_4), so the copy above is a no-op for them.
+  // Propagate the stored tuple struct type so the generic list tuple-element
+  // read resolves it.
+  if (component != "values")
+    return;
+
+  typet tuple_t = dict_handler_->recorded_tuple_value_type(dict_sym);
+  if (
+    !tuple_t.is_nil() && !tuple_t.is_empty() &&
+    element_type_registry_.size(lhs_identifier) == 0)
+    element_type_registry_.record(lhs_identifier, std::string(), tuple_t);
+}
+
+void python_converter::propagate_list_type_info(
+  const exprt &lhs,
+  const exprt &rhs,
+  symbolt *lhs_symbol)
+{
+  const std::string &lhs_identifier = lhs.identifier().as_string();
+  const std::string &rhs_identifier = rhs.identifier().as_string();
+  element_type_registry_.assign_from(rhs_identifier, lhs_identifier);
+
+  // When rhs is dict_sym.keys / dict_sym.values (a member expression
+  // rather than a list symbol), rhs_identifier is empty and
+  // assign_from above is a no-op.  Look up the dict's internal
+  // keys-list or values-list symbol and propagate from there instead.
+  if (rhs_identifier.empty() && rhs.id() == exprt::member)
+    propagate_dict_member_list_type_info(rhs, lhs_identifier);
+
+  if (lhs_symbol)
+  {
+    const symbolt *rhs_symbol = nullptr;
+    if (rhs.is_symbol())
+      rhs_symbol = find_symbol(rhs.identifier().as_string());
+    if (rhs_symbol && rhs_symbol->is_set)
+      lhs_symbol->is_set = true;
+  }
+}
+
+/// Whether a module-scope assignment has to probe its RHS type before choosing
+/// the target's type.
+///
+/// The probe runs unconditionally for a symbol id carrying `@F`. At module
+/// scope it used to run only when the annotation already resolved to a tagged
+/// type, so copying a tagged name there (`y = x`) left the target scalar and
+/// the scalar path built a member over the tagged struct, aborting in member2t.
+/// The same assignment inside a function already worked. A `for` over a list of
+/// tagged scalars hits this too: the preprocessor unrolls it into exactly such
+/// a chain of tagged-name copies. An inferred annotation on a dict subscript
+/// (`y = d[k]`) needs the same check: it's a guess, and the dict's value may
+/// be tagged anyway. Narrowed to dict subscripts specifically, since probing
+/// any other inferred-annotation RHS here re-evaluates it outside its normal
+/// guarded path (e.g. a list subscript's bounds check).
+bool python_converter::module_scope_rhs_needs_type_probe(
+  const nlohmann::json &ast_node)
+{
+  if (!current_func_name_.empty())
+    return false;
+  if (type_handler_.is_tagged_scalar_type(current_element_type))
+    return true;
+  const nlohmann::json &value = ast_node["value"];
+  if (
+    ast_node.value("_inferred_annotation", false) && value.is_object() &&
+    value.value("_type", "") == "Subscript" && value.contains("value") &&
+    value["value"].value("_type", "") == "Name" &&
+    value["value"].contains("id"))
+  {
+    symbol_id base_sid = create_symbol_id();
+    base_sid.set_object(value["value"]["id"].get<std::string>());
+    const symbolt *base_sym = symbol_table_.find_symbol(base_sid.to_string());
+    if (
+      base_sym && dict_handler_->is_dict_type(ns.follow(base_sym->get_type())))
+      return true;
+  }
+  return value.is_object() && value.value("_type", "") == "Name" &&
+         value.contains("id") &&
+         dynamic_type_handler_.is_tagged(value["id"].get<std::string>());
+}
+
 void python_converter::get_var_assign(
   const nlohmann::json &ast_node,
   codet &target_block)
@@ -5494,8 +5963,7 @@ void python_converter::get_var_assign(
     if (
       (sid.to_string().find("@F") != std::string::npos &&
        sid.to_string().find("@C") == std::string::npos) ||
-      (type_handler_.is_tagged_scalar_type(current_element_type) &&
-       current_func_name_.empty()))
+      module_scope_rhs_needs_type_probe(ast_node))
     {
       is_right = true;
       if (!ast_node["value"].is_null())
@@ -5561,6 +6029,8 @@ void python_converter::get_var_assign(
       resolve_any_subscript_array_type(ast_node, current_element_type);
     current_element_type =
       resolve_call_argument_array_type(ast_node, current_element_type);
+    current_element_type =
+      resolve_numpy_reducer_call_array_type(ast_node, current_element_type);
 
     // Location and symbol lookup
     location_begin = get_location_from_decl(target);
@@ -6130,62 +6600,14 @@ void python_converter::get_var_assign(
 
     adjust_statement_types(lhs, rhs);
 
-    // Handle list type info propagation
-    if (lhs.type() == rhs.type() && lhs.type() == type_handler_.get_list_type())
-    {
-      const std::string &lhs_identifier = lhs.identifier().as_string();
-      const std::string &rhs_identifier = rhs.identifier().as_string();
-      python_list::copy_type_info(rhs_identifier, lhs_identifier);
-
-      // When rhs is dict_sym.keys / dict_sym.values (a member expression
-      // rather than a list symbol), rhs_identifier is empty and
-      // copy_type_info above is a no-op.  Look up the dict's internal
-      // keys-list or values-list symbol and propagate from there instead.
-      if (rhs_identifier.empty() && rhs.id() == exprt::member)
-      {
-        const exprt &dict_sym = rhs.op0();
-        // get_component_name() returns an irep_idt by value; bind the string
-        // by value so it is copied out before that temporary is destroyed
-        // (GCC -Wdangling-reference under -Werror).
-        const std::string component =
-          to_member_expr(rhs).get_component_name().as_string();
-        if (
-          dict_sym.is_symbol() &&
-          (component == "keys" || component == "values"))
-        {
-          const std::string &dict_id = dict_sym.identifier().as_string();
-          const std::string &src = python_dict_handler::get_internal_list_id(
-            dict_id, component == "keys");
-          if (!src.empty())
-          {
-            python_list::copy_type_info(src, lhs_identifier);
-            // Tuple values are recorded under the $dict_value_types$ key,
-            // not the values-list id (github_3719_4), so the copy above is
-            // a no-op for them. Propagate the stored tuple struct type so
-            // the generic list tuple-element read resolves it.
-            if (component == "values")
-            {
-              typet tuple_t =
-                dict_handler_->recorded_tuple_value_type(dict_sym);
-              if (
-                !tuple_t.is_nil() && !tuple_t.is_empty() &&
-                python_list::get_list_type_map_size(lhs_identifier) == 0)
-                python_list::add_type_info_entry(
-                  lhs_identifier, std::string(), tuple_t);
-            }
-          }
-        }
-      }
-
-      if (lhs_symbol)
-      {
-        const symbolt *rhs_symbol = nullptr;
-        if (rhs.is_symbol())
-          rhs_symbol = find_symbol(rhs.identifier().as_string());
-        if (rhs_symbol && rhs_symbol->is_set)
-          lhs_symbol->is_set = true;
-      }
-    }
+    // Handle list type info propagation. A subscript store rebinds an element,
+    // not the container, and its lhs is an unnamed dereference -- propagating
+    // would write the element's entries into the empty-key bucket that
+    // attribute-rooted lists (self.xs) use as their map key (#7360).
+    if (
+      lhs.type() == rhs.type() && lhs.type() == type_handler_.get_list_type() &&
+      !assignment_target_is_subscript(ast_node))
+      propagate_list_type_info(lhs, rhs, lhs_symbol);
     else if (
       rhs.type() != lhs.type() && lhs.type().is_array() &&
       !rhs.type().is_code())
@@ -6196,7 +6618,7 @@ void python_converter::get_var_assign(
       // `const array_typet& = lhs.type()` constructed a throwaway array (with
       // a nil size) rather than reinterpreting the real type; it asserted
       // nothing meaningful and is removed.
-      lhs_symbol->set_type(rhs.type());
+      python_expr::set_symbol_type_if_carried(*lhs_symbol, rhs.type());
 
       code_declt decl(symbol_expr(*lhs_symbol), rhs);
       decl.location() = location_begin;
@@ -6278,11 +6700,9 @@ void python_converter::get_var_assign(
   }
   else
   {
-    {
-      exprt v = gen_zero(current_element_type, true);
-      v.zero_initializer(true);
-      lhs_symbol->set_value(std::move(v));
-    }
+    // No Python reader wants #zero_initializer; only Solidity's converter
+    // reads it, on its own values.
+    lhs_symbol->set_value(migrate_expr(gen_zero(current_element_type, true)));
 
     code_declt decl(symbol_expr(*lhs_symbol));
     decl.location() = location_begin;
@@ -6393,11 +6813,14 @@ void python_converter::get_compound_assign(
 
   // Set flags for LHS processing
   is_converting_lhs = true;
+  const nlohmann::json *saved_store_target = lhs_store_target_;
+  lhs_store_target_ = &ast_node["target"];
 
   // Get the target expression first
   exprt lhs = get_expr(ast_node["target"]);
 
   // Reset LHS flag and set RHS flag
+  lhs_store_target_ = saved_store_target;
   is_converting_lhs = false;
   is_converting_rhs = true;
 
@@ -6427,6 +6850,35 @@ void python_converter::get_compound_assign(
     throw std::runtime_error(
       "Unsupported target type in compound assignment: " +
       ast_node["target"]["_type"].get<std::string>());
+  }
+
+  // Desugar `x op= v` into `x = x op v`, reusing get_var_assign's tagged
+  // dispatch instead of duplicating it here.
+  if (type_handler_.is_tagged_scalar_type(lhs.type()))
+  {
+    std::string op_type = ast_node["op"]["_type"].get<std::string>();
+    if (op_type != "Add" && op_type != "Sub" && op_type != "Div")
+      throw std::runtime_error(
+        "operator '" + op_type +
+        "' on a dynamically-typed variable is not yet supported");
+
+    nlohmann::json binop;
+    binop["_type"] = "BinOp";
+    binop["left"] = ast_node["target"];
+    binop["op"] = ast_node["op"];
+    binop["right"] = ast_node["value"];
+    copy_location_fields_from_decl(ast_node, binop);
+
+    nlohmann::json synthetic;
+    synthetic["_type"] = "Assign";
+    synthetic["targets"] = nlohmann::json::array({ast_node["target"]});
+    synthetic["value"] = binop;
+    copy_location_fields_from_decl(ast_node, synthetic);
+
+    is_converting_lhs = false;
+    is_converting_rhs = false;
+    get_var_assign(synthetic, target_block);
+    return;
   }
 
   // For attribute assignments, use the type from the LHS expression
@@ -6499,7 +6951,7 @@ void python_converter::get_compound_assign(
       if (symbol)
       {
         // Update the symbol's type to pointer if concatenated returns pointer
-        symbol->set_type(concatenated.type());
+        symbol->set_type(migrate_type(concatenated.type()));
 
         // Update LHS to be a symbol with the new type
         lhs = symbol_exprt(symbol->id, symbol->get_type());
@@ -6508,7 +6960,7 @@ void python_converter::get_compound_assign(
         // (it will be assigned via the assignment statement)
         if (concatenated.type().is_array())
         {
-          symbol->set_value(concatenated);
+          symbol->set_value(migrate_expr(concatenated));
         }
       }
     }
@@ -6662,6 +7114,36 @@ exprt python_converter::apply_bool_dunder(exprt cond, const locationt &location)
   return result;
 }
 
+/// Type the arms of `T if c else None` (or the mirror) in place and return the
+/// ternary's type. A target over a reference T holds T*, NULL for None;
+/// otherwise the result is the Optional[T] struct.
+typet python_converter::optional_ternary_type(
+  exprt &then,
+  exprt &else_expr,
+  bool then_is_none)
+{
+  const typet &value_type = then_is_none ? else_expr.type() : then.type();
+  const bool reference_value = value_type.is_array() || value_type.is_pointer();
+  const typet &target =
+    current_lhs ? current_lhs->type() : ternary_return_target_;
+  if (!reference_value || !target.is_pointer())
+  {
+    typet result_type = type_handler_.build_optional_type(value_type);
+    then = wrap_in_optional(then, result_type);
+    else_expr = wrap_in_optional(else_expr, result_type);
+    return result_type;
+  }
+
+  const typet result_type = target;
+  exprt &value = then_is_none ? else_expr : then;
+  if (value.type().is_array())
+    value = string_handler_.get_array_base_address(value);
+  if (value.type() != result_type)
+    value = typecast_exprt(value, result_type);
+  (then_is_none ? then : else_expr) = gen_zero(result_type);
+  return result_type;
+}
+
 exprt python_converter::get_conditional_stm(const nlohmann::json &ast_node)
 {
   // A walrus in a `while` test re-evaluates every iteration, but get_named_expr
@@ -6690,8 +7172,12 @@ exprt python_converter::get_conditional_stm(const nlohmann::json &ast_node)
   nlohmann::json call_node;
   bool is_wrapped_in_unary = false;
 
-  // Check for function call wrapped in UnaryOp (e.g., "not func()")
-  if (test_type == "UnaryOp" && ast_node["test"].contains("operand"))
+  // Check for function call wrapped in `not` (e.g., "not func()"). Only `not`
+  // is re-applied below; -, ~ and + over a call take the general expression
+  // path, which dropped here used to leave the condition as the bare call.
+  if (
+    test_type == "UnaryOp" && ast_node["test"].contains("operand") &&
+    ast_node["test"]["op"]["_type"] == "Not")
   {
     auto operand_type = ast_node["test"]["operand"]["_type"].get<std::string>();
     if (operand_type == "Call")
@@ -6864,6 +7350,12 @@ exprt python_converter::get_conditional_stm(const nlohmann::json &ast_node)
       return cond;
     }
 
+    // A tagged value has no defined truthiness; refuse instead of building
+    // an ill-typed struct-to-bool node.
+    if (type_handler_.is_tagged_scalar_type(value_expr.type()))
+      throw std::runtime_error(
+        "truthiness of a dynamically-typed variable is not yet supported");
+
     exprt bool_expr = typecast_exprt(value_expr, bool_type());
     bool_expr.location() = get_location_from_decl(value_node);
     return bool_expr;
@@ -6956,14 +7448,9 @@ exprt python_converter::get_conditional_stm(const nlohmann::json &ast_node)
       if (!is_wrapped_in_unary)
         return base_expr;
 
-      auto op = ast_node["test"]["op"]["_type"].get<std::string>();
-      if (op == "Not")
-      {
-        exprt unary_expr("not", bool_type());
-        unary_expr.copy_to_operands(base_expr);
-        return unary_expr;
-      }
-      return base_expr;
+      exprt unary_expr("not", bool_type());
+      unary_expr.copy_to_operands(base_expr);
+      return unary_expr;
     };
 
     // Get the function call expression with special handling
@@ -7017,6 +7504,14 @@ exprt python_converter::get_conditional_stm(const nlohmann::json &ast_node)
     if (!cond.type().is_bool())
     {
       const locationt location = get_location_from_decl(ast_node["test"]);
+
+      // A tagged value has no defined truthiness; refuse instead of
+      // falling through to a struct-typed guard.
+      if (type_handler_.is_tagged_scalar_type(cond.type()))
+        throw std::runtime_error(
+          "truthiness of a dynamically-typed variable is not yet "
+          "supported");
+
       typet value_type = ns.follow(cond.type());
       if (value_type.is_pointer())
         value_type = ns.follow(value_type.subtype());
@@ -7184,14 +7679,7 @@ exprt python_converter::get_conditional_stm(const nlohmann::json &ast_node)
 
     typet result_type;
     if (then_is_none != else_is_none)
-    {
-      // One branch is None, the other is T → Optional[T] models Python's T |
-      // None
-      typet concrete_type = then_is_none ? else_expr.type() : then.type();
-      result_type = type_handler_.build_optional_type(concrete_type);
-      then = wrap_in_optional(then, result_type);
-      else_expr = wrap_in_optional(else_expr, result_type);
-    }
+      result_type = optional_ternary_type(then, else_expr, then_is_none);
     else
     {
       // Resolve result type based on branch types
@@ -7349,6 +7837,18 @@ exprt python_converter::box_value_on_heap(
   return heap_ptr;
 }
 
+/// A returned `T if c else None` takes the declared return type as its
+/// target, as an assigned one takes the variable's.
+exprt python_converter::get_return_value(const nlohmann::json &value)
+{
+  if (value.value("_type", "") != "IfExp")
+    return get_expr(value);
+  ternary_return_target_ = current_func_return_type_;
+  exprt result = get_expr(value);
+  ternary_return_target_ = typet();
+  return result;
+}
+
 void python_converter::get_return_statements(
   const nlohmann::json &ast_node,
   codet &target_block)
@@ -7388,6 +7888,14 @@ void python_converter::get_return_statements(
     target_block.copy_to_operands(return_code);
     return;
   }
+
+  // Same check Assign already applies to its RHS: a numpy view (copied,
+  // transpose, or reshape) stashed inside a list/tuple/dict escapes into a
+  // container get_expr cannot build a valid GOTO reference for, crashing
+  // deep in irep migration instead of raising a clean diagnostic. `return
+  // [a[0]]` is exactly Assign's own `y = [a[0]]` case, just via a Return
+  // instead of an Assign target.
+  reject_copied_numpy_view_in_container(ast_node, {"List", "Tuple", "Dict"});
 
   bool is_user_defined_function = false;
   if (
@@ -7444,7 +7952,7 @@ void python_converter::get_return_statements(
     }
   }
 
-  exprt return_value = get_expr(ast_node["value"]);
+  exprt return_value = get_return_value(ast_node["value"]);
   locationt location = get_location_from_decl(ast_node);
 
   // Coerces `val` to a tagged-object value when the function's return type
@@ -7457,8 +7965,8 @@ void python_converter::get_return_statements(
     if (
       type_handler_.is_numeric_scalar_type(val.type()) ||
       type_handler_.is_string_type(val.type()))
-      val = dynamic_type_handler_.build_tagged_return_value(
-        val, location, target_block);
+      val =
+        dynamic_type_handler_.build_tagged_value(val, location, target_block);
     else
       throw std::runtime_error(
         "returning a value of this type from a dynamically-typed function "

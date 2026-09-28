@@ -22,10 +22,21 @@ disabled block is superseded; and R29 — found by M9's own access-shape census 
 is a **new High-severity false SUCCESSFUL**, partly fixed, with its residual
 traced out of this subsystem into `src/pointer-analysis`.
 
-**Still open:** R29's two bare-struct-member shapes and the pre-existing
-R16/R19–R27 rows §9.2 records individually. R6 got its witness and its fix
-(#6785); A6.4, carried since M6, is discharged by the run-order invariant the
-engine now checks in release.
+**Still open:** the rows §9.2 records individually as not fixed, and the
+residuals named in the R38, R44 and R52 rows. R29's two bare-struct-member
+shapes, listed here until 2026-09-24, were closed on 2026-08-12 (§15 M9 (R29
+residual)). R6 got its witness and its fix (#6785); A6.4, carried since M6, is
+discharged by the run-order invariant the engine now checks in release.
+
+**Self-verification, re-measured 2026-09-24 (§15 M9 (G14, R53)).** G12 and G13
+are fixed, and `irep2_type.h` and `renaming.h` convert. They then exposed
+**G14**, a symex abort caused by a frontend naming collision that also gave a
+false SUCCESSFUL on ordinary C++ (**R53**, fixed). Both headers now reach
+`VERIFICATION SUCCESSFUL` with an empty `main`. That covers only their static
+initialisers. The open question is now whether a driver that calls into
+`renaming::level1t` verifies (§13.6 WI-4), and `goto_symex_state.h` still fails
+to parse.
+
 **Audience:** An engineer who will implement the harnesses and run the
 verification tasks directly from this document.
 **Companion:** `docs/irep2-verification-plan.md` (branch
@@ -101,6 +112,7 @@ Two probes were run against `build/src/esbmc/esbmc` (ESBMC 8.4.0, this tree):
 |---|---|---|
 | **P-1** | `std::unordered_map<std::string, POD>` + `std::make_shared` + `assert`, `--unwind 4` | `VERIFICATION SUCCESSFUL`, 2132 VCCs, 4.6 s. ESBMC's C++ operational models cover a useful STL subset. |
 | **P-2** | `#include <goto-symex/renaming.h>` with the real include paths | **`ERROR: PARSING ERROR`** — `no template named 'is_standard_layout' in namespace 'std'`, raised inside `immer/detail/combine_standard_layout.hpp` (pulled in by `level1_map.h`). |
+| **P-2′** | same, re-run 2026-09-06 on 8.5.0 | **Parses with zero errors.** The row above is closed; the blocker is now conversion, not parsing — see §13.2 (G12/G13) and §15 M9 (self-verification re-measure). The paragraph below still holds, for that different reason. |
 
 `src/goto-symex` is compiled `-std=gnu++23` (`build/compile_commands.json`) and
 links `immer`, `fmt`, Boost, `BigInt`, `yaml-cpp` and the whole of `irep2`.
@@ -124,7 +136,7 @@ The plan therefore splits targets into four honest tiers.
 | **A — ESBMC-verifiable kernels** | Self-contained algorithmic cores lifted out of the template/library layer: SSA counter algebra, guard-merge selection, merge-queue conservation, slicer dependency closure, unwind-bound selection, MPOR dependency relation, frame lifecycle, equation context stack | Standalone reduced C/C++ harnesses driven by `nondet_*()` and `__ESBMC_assume`, verified with the full property flag-set | Once lifted, these are ordinary imperative code. ESBMC excels here and returns a *deterministic witness* on failure. |
 | **B — Property / differential tests on the real classes** | Contracts that need the genuine engine: SSA well-formedness of produced equations, slicer equisatisfiability, renaming round-trip, phi-count laws, value-set merge monotonicity, run-to-run determinism | Catch2 in `unit/goto-symex/`, driving real symex via `unit/testing-utils/goto_factory.h` | The engine cannot be reduced without losing fidelity, but its *observable output* (the equation) is a first-class inspectable object. |
 | **C — Whole-tool metamorphic / differential oracles** | Properties of the composed pipeline: transformation parity, solver parity, unwind monotonicity, POR parity, multi-property parity | Scripted sweeps over the existing `regression/` corpora comparing verdicts under semantically-equivalent flag pairs | These catch *composition* bugs that no unit test sees, at zero modelling cost, over the 1400 `CORE` inputs already in `regression/esbmc`. |
-| **D — Not effectively verifiable here** | `immer` internals, `BigInt`/`fmt` internals, `std::atomic` ordering in irep2, the value-set/pointer-analysis fixpoint (`src/pointer-analysis`), the SMT backends | Sanitizers (existing `.github/workflows/sanitizers.yml`), hand proof, the sibling irep2 plan | Documented, **not** claimed as proven. See §14. |
+| **D — Not effectively verifiable here** | `immer` internals, `BigInt`/`fmt` internals, `std::atomic` ordering in irep2, the value-set/pointer-analysis fixpoint (`src/pointer-analysis`), the SMT backends | Sanitizers (the existing sanitizer job in `.github/workflows/ci-weekly.yml`), hand proof, the sibling irep2 plan | Documented, **not** claimed as proven. See §14. |
 
 ### 2.3 Prioritised component scope
 
@@ -705,13 +717,13 @@ this document** — each is a prioritised target for the cited harness.
 | **R27** | **High (missed bug, default configuration)** — found by M8 triage, §15 M8 (cont. 6); filed as **#6558**, fixed by **#6571**; **renumbered from R23**, which §15 uses for the compound-assignment defect | **A real race is lost when the guarded branch writes its own guard variable back to the falsifying value.** Nine lines: `t1` loops twice over `if (receive) { assert(i < 1); receive = 0; }` while `main` sets `receive = 1` after `pthread_create`. The racy schedule — `i=0` reads 0 and skips, `main` writes 1, `i=1` reads 1 and the assertion fires — is explored and reported when the branch body is empty, writes a *different* variable, or writes `receive = 1`. Only `receive = 0` loses it. **On that schedule the added write never executes before the violation**, since the body is skipped at `i=0` and the assertion fires before reaching the write at `i=1`, so provably-unexecuted code is removing a counterexample. **No flag recovers it:** `--no-por`, `--context-bound 8`, `--state-hashing`, `--no-slice` and `--no-interval-symex-guard` all still report SUCCESSFUL, which rules out POR, the context bound, state hashing, the slicer and the interval-domain guard pruning that was the natural suspect. **Narrowed further, §15 M8 (cont. 7):** the loss needs all three of — `t1` guards on X, `t1` writes X in the guarded body, and `main` writes X *exactly once*. Splitting the guard from the written variable in either direction restores detection, and so does giving `main` a second, redundant `receive = 1`. Since a duplicated identical write cannot change the formula's meaning but does add a scheduling point, the incompleteness is in the **interleaving set**, not the encoding. The GOTO programs of the detected and missed variants are instruction-for-instruction identical apart from the assignment target, so nothing upstream of symex differs. Mechanism still unknown. | discriminator table above; `regression/esbmc-unix/race_guard_self_clear` (CORE since #6571) and `race_guard_other_write` (CORE, different variable, caught today); `regression/esbmc-unix/03_circular_reduce` (pre-existing KNOWNBUG) | M8 triage | **Violability proven, gate hypothesis retracted, §15 M8 (cont. 8–9):** under `--data-races-check` the program reports FAILED **on the assertion itself**, so the schedule is reachable and the claim genuinely violable — the miss is a real incompleteness, not a modelling artefact. The `main_thread_ended` cutoff in `check_if_ileaves_blocked` was proposed as the cause and is **refuted**: keeping `main` alive past its write, with up to four further global writes, still reports SUCCESSFUL. `--data-races-check` both bypasses that gate *and* adds race instrumentation, so it does not isolate either. **Fixed by #6571**, which found three composing defects in the branch-merge path and flipped the pin to CORE. |
 | **R29** | **High (false SUCCESSFUL, default configuration)** — found by the H-A6 shape census, §15 M9 (H-A6); **renumbered from R28** on merging master, which uses that number for the `--no-simplify` truncation defect; this branch's commit titles predate the renumbering | **A pointer held in an aggregate defeats MPOR's access resolution.** `get_expr_globals` gates its pointer-chain resolution on `is_symbol2t(expr)`, so a pointer reached through any aggregate step never enters it: the write is keyed on the *aggregate* while another thread keys on the target, MPOR calls the two transitions independent and prunes the racy interleaving. `*(s.p) = 1` against a concurrent `g = 2` reports **SUCCESSFUL** by default and **FAILED** under `--no-por`, both under Bitwuzla and Z3. Five shapes reproduce it — struct member (`s.p`), arrow (`sp->p`), array element (`pa[0]`), nested struct (`o.in.p`), union member (`u.p`) — and the boundary is exact: copying the pointer to a local first (`int *lp = s.p;`) restores detection, so the gate is syntactic, not a value-set limitation. This is **R18/#6539 generalised**: that fix followed chains of *symbols*, and an aggregate step between the pointer and its name was left outside. | census of 21 access shapes, 16 + 5 boundary probes; `regression/esbmc-unix/mpor_aggregate_ptr_race` (KNOWNBUG when filed, now CORE) and `..._local` (CORE control) | H-A6 | **Fixed.** §15 M9 (R29 fix) closed the array-element, arrow and union shapes with a `dereference2t` arm; §15 M9 (R29 residual) closed the two bare struct-member shapes in `src/pointer-analysis`. The cause was neither the arm asymmetry nor the `get_reference_set` count this row first recorded — constant propagation leaves the aggregate a `constant_struct2t`, whose members' values sit in the expression itself, so there is no suffixed symbol to key on. Review of that fix found two further false SUCCESSFULs, both fixed: splitting the value-set suffix on `.` breaks clang's anonymous member names, and the constant-union arm never consumed its suffix. `mpor_aggregate_ptr_race` is **CORE**, joined by `_nested`, `_anon`, `_prefix` and `_union_struct`; the census re-runs 21/21 dual-solver, §15 M9 (H-A6 re-census). |
 | **R26** | **Medium–High (missed check, non-default flag)** — found by M8 triage, §15 M8 (cont. 3); **renumbered from R22**, which §15 uses for the return-value interleaving defect | **`--overflow-check` does not check arithmetic on a bitfield member.** `struct { int a : 3; } b = {3}; b.a += nondet_int();` reports **SUCCESSFUL**, though `3 + INT_MAX` overflows. The same statement on a *plain* member of the same struct is checked and reports FAILED, as is a plain local (`int x = 3; x += nondet_int()`). The gap is the bitfield, not the union, the sign, or the operand: struct and union bitfields, signed and unsigned, all miss it, while struct and union plain members are all checked. Attributes the pre-existing `github_162_fail` KNOWNBUG. | boundary probes above; `regression/esbmc/overflow_bitfield_member` (CORE, flipped from KNOWNBUG by R23's fix) and `overflow_plain_member` (CORE, plain member, caught today); `regression/esbmc/github_162_fail` (pre-existing KNOWNBUG) | M8 triage | Done, as a side effect of R23: the compound assignment was narrowing `b.a` to its 3-bit type before the addition, so the overflow claim was unfalsifiable. Performing the operation in the computation type emits `!overflow("+", (signed int)b.a, a)` and the check fires. |
-| **R21** | **Medium (incompleteness, default configuration)** — found by M8 triage, §15 M8 (cont.); filed as **#6545** | **Multiplying an address-derived integer loses object identity, so the reconstructed pointer is rejected.** `uintptr_t u = (uintptr_t)&s; u *= 2; u -= (uintptr_t)&s; *(int *)u = 3;` recovers `&s` exactly, yet reports **FAILED**. The boundary: an *additive* round-trip (`u += 4; u -= 4`) is tracked, multiplying a *pure integer* offset and adding it to an address is tracked, and `u = u * 1` folds away — only a genuine multiplication of an address-derived term defeats recovery. `offsetof` counts as address-derived, since it expands to `(size_t)&((S *)0)->m`: the same program with a literal `4` in place of `offsetof(struct S, y)` verifies, with `offsetof` it does not. Attributes three pre-existing KNOWNBUGs to one cause — `github_426_2` (multiplies an `offsetof`), `github_426_3` and `github_426_4` (multiply an address). Noisy direction, so P1: a spurious counterexample, not a missed bug — and the exact complement of R20, which *accepts* a computed address it should reject. | boundary probes above; `regression/esbmc/ptr_int_multiply_roundtrip` (KNOWNBUG) and `ptr_int_additive_roundtrip` (CORE); `regression/esbmc/github_426_{2,3,4}` (pre-existing KNOWNBUGs) | M8 triage; H-A10's `symex_dereference` obligation | **Closed as a stated limitation** (#6545): `docs/design/pointer-integer-provenance.md` records why the obvious fix is unsound, and `ptr_int_multiply_roundtrip` stays KNOWNBUG as that limitation's marker rather than as an open defect. Still reproduces by design. |
+| **R21** | **Medium (incompleteness, default configuration)** — found by M8 triage, §15 M8 (cont.); filed as **#6545** | **Multiplying an address-derived integer loses object identity, so the reconstructed pointer is rejected.** `uintptr_t u = (uintptr_t)&s; u *= 2; u -= (uintptr_t)&s; *(int *)u = 3;` recovers `&s` exactly, yet reports **FAILED**. The boundary: an *additive* round-trip (`u += 4; u -= 4`) is tracked, multiplying a *pure integer* offset and adding it to an address is tracked, and `u = u * 1` folds away — only a genuine multiplication of an address-derived term defeats recovery. `offsetof` counts as address-derived, since it expands to `(size_t)&((S *)0)->m`: the same program with a literal `4` in place of `offsetof(struct S, y)` verifies, with `offsetof` it does not. Attributes three pre-existing KNOWNBUGs to one cause — `github_426_2` (multiplies an `offsetof`), `github_426_3` and `github_426_4` (multiply an address). Noisy direction, so P1: a spurious counterexample, not a missed bug — and the exact complement of R20, which *accepts* a computed address it should reject. | boundary probes above; `regression/esbmc/ptr_int_multiply_roundtrip` (KNOWNBUG) and `ptr_int_additive_roundtrip` (CORE); `regression/esbmc/github_426_{2,3,4}` (pre-existing KNOWNBUGs) | M8 triage; H-A10's `symex_dereference` obligation | First closed as a stated limitation, then **FIXED by #6905**, §15 M9 (R21 re-measured). The limitation reading held only while the fix was taken to be dropping the `unknown`; unioning it into the result instead recovers the object *and* keeps the `invalid pointer` property. `ptr_int_multiply_roundtrip` and the four `github_426_*` tests are CORE, and `docs/design/pointer-integer-provenance.md` records what object recovery is now — a may-approximation with a nondet offset, not an exact reconstruction. |
 | **R20** | **Medium–High (missed bug, default configuration)** — found by M8 triage, §15 M8 (cont.); filed as **#6544** | **A dereference through a constant non-null integer address is unchecked.** One line reproduces it: `int *p = (int *)65; return *p;` reports **`VERIFICATION SUCCESSFUL`**. The boundary is narrow and is what makes this a defect rather than a modelling choice: `(int *)0` is caught by the null check, `(int *)nondet_ulong()` is caught, and `(int *)(unsigned long)&x` is correctly accepted as a valid round-trip — only the *constant* non-null address escapes, for reads and for writes alike. Attributes two pre-existing KNOWNBUGs to one cause: `github_1175_9` casts `'A'` (65) and `github_1175_11` casts a constant-folded `strlen("Hello")` (5). **The obvious mechanism is refuted:** `--no-propagation` and `--no-simplify`, together and separately, leave the verdict SUCCESSFUL, so constant propagation is not what loses the check. | one-line reproducer above; `regression/esbmc/deref_constant_int_address` (KNOWNBUG) and `deref_nondet_int_address` (CORE, nondet address, caught today); `regression/esbmc/github_1175_{9,11}` (pre-existing KNOWNBUGs) | M8 triage; belongs to H-A10's `symex_dereference` obligation | **Fixed by #6554**, which compares object ids in the invalid-pointer check. Re-measured 2026-08-03: `(int *)65` now reports FAILED and `deref_constant_int_address` is CORE. |
 | **R19** | **High (per-property false PASSED, non-default flag pair)** — **confirmed with a minimal reproducer** by H-B8, §15 M7; filed as **#6540** | **With `--multi-property --smt-during-symex`, a violable claim that is not the last property is individually reported as `✓ PASSED`.** Seven lines reproduce it: two non-trivial properties where the violable one comes first. ESBMC prints `✓ PASSED` for the violable claim, `Properties: 2 verified ✓ 2 passed`, and `VERIFICATION SUCCESSFUL`. Swapping the two assertions so the violable one is **last** restores `FAILED`, so the defect is positional. Neither flag alone loses the counterexample — `--multi-property` alone and `--smt-during-symex` alone both report FAILED — making this a flag *composition* defect like R17. This is I13 exactly as H-B8 hypothesised it: the per-claim solve reuses a `runtime_encoded_equationt` whose context stack still carries the preceding claim's state, so a non-final claim is discharged against the wrong formula. Worse than a verdict flip: the per-property report actively asserts the claim holds. | `oracle_flag_parity.py --b=--smt-during-symex` (3 corpus divergences: `github_1408`, `github_1890_1`, `github_2629`, all `--multi-property` tests); reproducer in #6540; **no portable regression pin** — see §15 M7 (CI) | **H-B8** | **Fixed by #6565**, which scoped the per-claim solves on the shared runtime solver — exactly the `push_ctx`/`pop_ctx` pairing this entry named. Re-measured 2026-08-03: both claim orderings now report the violable claim FAILED. |
 | **R22** | **High (false SUCCESSFUL, default configuration)** — **confirmed with a minimal reproducer** by M8 triage, **confirmed and fixed**, §15 M8 (cont. 6) | **A shared write performed by a function's return-value assignment creates no interleaving point.** Six lines reproduce it: one thread runs `x = notify(); x = 2;` (`notify` returns `1`), another asserts `x != 1`. Default reports **SUCCESSFUL** — no schedule can observe the intermediate value, because no context switch is offered between the two writes. Three controls make the boundary exact: writing `x = 1; x = 2;` inline reports FAILED; splitting the call off the shared write (`int v = notify(); x = v; x = 2;`) reports FAILED; and inserting *any* other shared write between them (`x = notify(); g = 5; x = 2;`) reports FAILED. The value therefore reaches the equation — `x = notify();` alone reports FAILED, and an in-thread `assert(x == 1)` after it holds — so what is lost is the *scheduling point*, not the write. Not POR (`--no-por` unchanged), not the context bound (`--context-bound 10` unchanged), and not constant propagation (the split control propagates identically and still catches it). `x = notify()` lowers to a `FUNCTION_CALL` instruction carrying the lhs, so the write is performed by the `RETURN` case's `make_return_assignment` path; `execution_statet::symex_step` calls `analyze_assign(assign)` there **after** `symex_return(thecode)`, whose last statement is `cur_state->guard.make_false()`, and `analyze_assign` early-returns on a false guard. That is the same mistake #6558 fixed at `symex_goto`, and instrumentation confirms the reorder does exactly what the argument predicts — the `RETURN` step goes from `writes=0 cswitch=false` to `writes=1 cswitch=true`. **It is still not sufficient**, and the second half is now identified: `execute_guard` emits `assume(false)` and kills the interleaving whenever a switch is taken away from a thread whose guard is false, which `symex_return` guarantees at a return boundary. That is **#6558's defect at a second boundary** — the `last_transition.branch` arm chains the pre-branch guard for gotos and nothing does so for returns. Both halves must be fixed together; see §15 M8 (cont. 4) and (cont. 5). **Fixed in §15 M8 (cont. 6)**, where the two halves collapse into one change: a return parks its continuation exactly as a branch parks its sibling arm, so `symex_return` now records that parked path through the same hook `symex_goto` uses, and the existing branch arms in `execute_guard` and `preserve_last_paths` cover returns unchanged. Fixing only the first two halves exposed a third — the returning thread was marked `thread_ended` at the boundary — which the same change removes. | reproducer and controls above; `execution_statet::execute_guard`, `execution_state.cpp:712-755`; `execution_statet::symex_step` `RETURN` case, `execution_state.cpp:339-356`; `goto_symext::symex_return`, `symex_function.cpp:1041-1066`; `execution_statet::analyze_assign`, `execution_state.cpp:819-838`; `regression/esbmc-unix/symex_return_value_cswitch` (CORE, flipped from KNOWNBUG by the fix), `..._split` (CORE) and `..._resume` (CORE, added by the fix to pin the thread-survival half) | M8 triage; **H-A6**'s A6.2 completeness obligation | Done. All three pins are CORE and the whole `esbmc-unix` suite is clean. |
 | **R18** | **High (false SUCCESSFUL, default configuration)** — **FIXED**, §15 M6 (fix); filed as **#6539**, fixed by **#6550** | **POR drops a racy interleaving when the write goes through a nested dereference.** `get_expr_globals` resolves *one* pointer level (`get_reference_set` on a single `dereference2tc`), so a write spelled `*(*gpp) = 1` is recorded against the intermediate pointer `gp` rather than its target `g`. A second thread writing `g` directly records `g`, the two keys do not alias, `check_mpor_dependency` returns *independent*, and the interleaving is pruned — **a real race missed in the default configuration, with no diagnostic**. Twelve lines reproduce it: writer does `*(*gpp) = 1`, `main` does `g = 2; seen = g;`, and `assert(seen == 2)` is reachable. Default reports **SUCCESSFUL**; `--no-por` reports FAILED. The mechanism is pinned by a decisive pair: with *both* threads using the nested form the race is found again (matching keys), while writer-nested/main-direct misses it. Splitting the nested access into `int *q = *gpp; *q = 1;` also restores detection, so the key depends on the syntactic nesting depth of the access rather than on the object touched. This is precisely the completeness direction H-A6's A6.2 names — a missed dependency — and it is **not** in the relation but upstream in the key construction feeding it. | `execution_statet::get_expr_globals`, `execution_state.cpp:868-918`; `check_mpor_dependency`, `:1050`; `mpor_set_conflicts`, `:231`; `regression/esbmc-unix/mpor_nested_deref_race` (KNOWNBUG) and `..._nopor` (CORE) | **H-A6**, **H-C4** | **Fixed in #6550** by following the chain and recording every shared object along it. The cost gate the entry called for was run: H-C4 agreement *rose* (258→259 on `--no-por`, 255→257 on `--state-hashing`) at 0 divergences, and the concurrency suite timing was unchanged (24.10 s vs 24.12 s). |
 | **R16** | **Medium (incompleteness under a non-default flag)** — found by H-C2, §15 M5 (H-C2); **re-measured, all but one entry retired**, §15 M9 (R16) | **`--no-simplify` is not verdict-preserving: 10 corpus inputs where the default proves SUCCESSFUL and `--no-simplify` does not.** Nine report a spurious counterexample (`github_1174_{hex,lmod,oct,pass}`, `github_2341_3`, `github_2357_5`, `github_2566_1`, `github_785-2`, `realloc13`) and one returns UNKNOWN (`github_252`, under `--k-induction`). In every case the *default* leg matches the verdict the test's own `test.desc` expects, so the fault is in the `--no-simplify` configuration, not the default. Spot-confirmed on `github_2341_3`: `--no-simplify` reports a violated `assert(temp != NULL)` the default discharges. The noisy direction — P1 — but it means `do_simplify` is load-bearing for *correctness of the encoding*, not merely for formula size, which is not how an "optimisation" flag reads. | `oracle_flag_parity.py --b=--no-simplify` over `regression/esbmc` CORE | **H-C2** | **Re-measured, §15 M9 (R16).** Seven of the nine spurious-counterexample entries agree on a current binary. #6660, #6675 and #6676 all landed in the interval and each removed a modelling decision gated on `do_simplify` — the shape this whole list turned out to share — but the per-test attribution was not re-derived, so treat that as the likely cause rather than a measured one. Two more are not the simplifier's doing at all: `github_2357_5` and `github_2566_1` select `--ir`, and `github_562` (which the original list missed) selects `--fixedbv`; dropping the encoding flag makes both legs agree again in all three, so the oracle now excludes approximate encodings rather than comparing them. What is left of R16 proper is `github_252` — UNKNOWN under `--k-induction`, the sound direction. **Closed by #6781** (§15 M9 R16 closed): the forward condition could not close because the loop it reasoned about never exited under the flag, so the last R16 entry was a symptom of #6778 rather than a simplifier gap of its own, and its baseline entry is removed. The re-run also surfaced a divergence pair the original list did not contain, which is **R28**. |
-| **R28** | **Medium (false SUCCESSFUL, non-default flag combination)** — **confirmed with a ten-line reproducer** by H-C2, §15 M9 (R16) | **`--no-simplify` can put a bounded loop back where the default folded it away, and with `--no-unwinding-assertions` the resulting truncation discharges every claim on the path in silence.** `calloc`'s model ends in `memset(res, 0, total_size)`. With a constant `total_size` the default folds that to the byte-wise `gen_value_by_byte` form and no loop survives; under `--no-simplify` it takes `__memset_impl`'s loop, which needs `total_size` iterations. `github_1257-memcleanup` pins `--unwind 1` and passes `--no-unwinding-assertions`, so the truncation becomes an `assume(false)` that cuts every path through `calloc`, and a genuine CWE-401 leak reports **SUCCESSFUL** where the default reports FAILED. Ten lines reproduce it — `p = calloc(100, 8); if (!p) abort(); *p = 5; g = p;` — and the discriminator is exactly `calloc`: the same leak spelled `malloc(800)` is caught under both legs, because no memset is involved. Three controls pin the mechanism rather than the leak logic: raising the bound to `--unwind 801` reports the leak again and names `dynamic_2_array`, the object `calloc`'s non-zero path allocates; leaving unwinding assertions **on** turns the same run into `unwinding assertion loop 3` in `__memset_impl`; and the sibling `github_1257-memsafety`, which differs only by keeping them on, is the same mechanism surfacing honestly as a bound complaint (`SUCCESSFUL` → FAILED, the sound direction). Not a new unsoundness in symex — it is the documented truncated-loop hazard — but the route to it is a flag pair a user would not expect to change loop *structure*, an `--unwind` calibrated against the default program silently under-covers the `--no-simplify` one, and nothing warns. **Wider than the flag pair, §15 M9 (H-C2 residue):** the lost constant is what bounds the loop at all, so with *no* `--unwind` the same mechanism does not truncate — it fails to terminate, and that is what H-C2's 206 "inconclusive" results are. Confirmed on `__memcpy_impl` (`string.c:284`) and on two loops outside `string.c` entirely — a test's own `myMemcpy` and `__ESBMC_atexit_handler` (`stdlib.c:38`) — so the rule is any loop whose trip count `do_simplify` folds, not the string models. | `oracle_flag_parity.py --b=--no-simplify`; `regression/esbmc/github_1257-memcleanup` and `github_1257-memsafety`; `calloc` in `src/c2goto/library/stdlib.c`; `__memset_impl` at `src/c2goto/library/string.c:304` | **H-C2** | Filed as **#6778**; the guard-fold gate is fixed by **#6781** (300 CORE tests, measured against an unpatched build: 49 non-terminating -> 18, 238 agreed -> 269, no new divergence). **The diagnostic half is done, §15 M9 (R28 diagnostic):** an `--unwind` that truncates a loop while `--no-unwinding-assertions` is set now says so on the SUCCESSFUL path, since the two flags together turn every over-bound path into a vacuous proof. That does not address the unbounded form, which needs the trip count to survive `--no-simplify` rather than a warning, and is what remains of this row. Baselined meanwhile — see `baselines/simplify-parity.txt`. |
+| **R28** | **Medium (false SUCCESSFUL, non-default flag combination)** — **confirmed with a ten-line reproducer** by H-C2, §15 M9 (R16) | **`--no-simplify` can put a bounded loop back where the default folded it away, and with `--no-unwinding-assertions` the resulting truncation discharges every claim on the path in silence.** `calloc`'s model ends in `memset(res, 0, total_size)`. With a constant `total_size` the default folds that to the byte-wise `gen_value_by_byte` form and no loop survives; under `--no-simplify` it takes `__memset_impl`'s loop, which needs `total_size` iterations. `github_1257-memcleanup` pins `--unwind 1` and passes `--no-unwinding-assertions`, so the truncation becomes an `assume(false)` that cuts every path through `calloc`, and a genuine CWE-401 leak reports **SUCCESSFUL** where the default reports FAILED. Ten lines reproduce it — `p = calloc(100, 8); if (!p) abort(); *p = 5; g = p;` — and the discriminator is exactly `calloc`: the same leak spelled `malloc(800)` is caught under both legs, because no memset is involved. Three controls pin the mechanism rather than the leak logic: raising the bound to `--unwind 801` reports the leak again and names `dynamic_2_array`, the object `calloc`'s non-zero path allocates; leaving unwinding assertions **on** turns the same run into `unwinding assertion loop 3` in `__memset_impl`; and the sibling `github_1257-memsafety`, which differs only by keeping them on, is the same mechanism surfacing honestly as a bound complaint (`SUCCESSFUL` → FAILED, the sound direction). Not a new unsoundness in symex — it is the documented truncated-loop hazard — but the route to it is a flag pair a user would not expect to change loop *structure*, an `--unwind` calibrated against the default program silently under-covers the `--no-simplify` one, and nothing warns. **Wider than the flag pair, §15 M9 (H-C2 residue):** the lost constant is what bounds the loop at all, so with *no* `--unwind` the same mechanism does not truncate — it fails to terminate, and that is what H-C2's 206 "inconclusive" results are. Confirmed on `__memcpy_impl` (`string.c:284`) and on two loops outside `string.c` entirely — a test's own `myMemcpy` and `__ESBMC_atexit_handler` (`stdlib.c:38`) — so the rule is any loop whose trip count `do_simplify` folds, not the string models. | `oracle_flag_parity.py --b=--no-simplify`; `regression/esbmc/github_1257-memcleanup` and `github_1257-memsafety`; `calloc` in `src/c2goto/library/stdlib.c`; `__memset_impl` at `src/c2goto/library/string.c:304` | **H-C2** | Filed as **#6778**; the guard-fold gate is fixed by **#6781** (300 CORE tests, measured against an unpatched build: 49 non-terminating -> 18, 238 agreed -> 269, no new divergence). **The diagnostic half is done, §15 M9 (R28 diagnostic):** an `--unwind` that truncates a loop while `--no-unwinding-assertions` is set now says so on the SUCCESSFUL path, since the two flags together turn every over-bound path into a vacuous proof. **The unbounded form is closed too, §15 M9 (R28 unbounded):** the trip count now survives the flag, because `constant_propagation` never knew `sizeof2t` or any arithmetic beyond `add`, so `sizeof(a)/sizeof(a[0])` was not propagated and the guard compared against a bare symbol. Eleven census shapes decide where they used to hang; what is left is a genuinely symbolic bound, which is `--smt-symex-guard`'s job. Baselined meanwhile — see `baselines/simplify-parity.txt`. |
 | **R30** | **Medium–High (no verdict, default configuration)** — **confirmed with a five-line reproducer**, §15 M9 (R30) | **A loop whose trip count is statically determined but not *syntactically* a constant node never terminates, with no flags set.** `symex_goto` decides a branch by `is_false(new_guard)` (`symex_goto.cpp:23`), a syntactic test that only holds once `do_simplify` has folded the renamed guard to a literal, and nothing else in the default configuration can decide a loop exit: `--smt-symex-guard` asks the solver but is off, and the interval guard prunes only when the guard is provably *true* and never sets `new_guard_false`, by design. So the default configuration terminates exactly on the loops `simplify()` happens to fold. Five lines find one it does not — a pointer difference between two constant offsets into the same object: `int a[5]; int *p=&a[0], *q=&a[4]; unsigned n=q-p; for (unsigned i=0;i<n;i++) s++;` reaches **iteration 867405 in 20 s** and is still unwinding. The value is not in doubt: `assert(n == 4)` on its own proves SUCCESSFUL, the same program with the bound written `4` proves SUCCESSFUL, and adding `--smt-symex-guard` stops the loop at `iteration 4` in 0.004 s. This is R28's mechanism reached without `--no-simplify`, so the flag was never the cause — it only widened the set of guards that fail to fold. Not unsoundness: the tool returns no verdict rather than a wrong one, but a five-line program with a statically known bound hanging under default flags is a completeness defect a user meets as a hang. | `symex_goto.cpp:20-23`; `do_simplify` at `symex_assign.cpp:221`; reproducer above | **H-C2** | Filed as **#6779**, fixed by **#6783** (fold `&base[i] - &base[j]` to `i - j`, per C23 6.5.6p9). Same fix direction as R28's unbounded form: the exit decision should not rest on whether an *optimisation* folded the guard — either fold unconditionally for that decision, or fall back to the solver question `--smt-symex-guard` already implements. |
 | **R17** | **High (false SUCCESSFUL, default configuration)** — found by H-C2, §15 M5 (H-C2); **FIXED**, §15 M5 (R17 root cause) | **An allocation the address space cannot lay out is encoded as a contradiction instead of a failed allocation, so the whole formula goes UNSAT and every assertion is discharged vacuously.** Found as `void *b = malloc(-4); assert(0);` returning **`VERIFICATION SUCCESSFUL`** under `--no-simplify --no-slice`, and first recorded as a flag-*composition* defect. It is not one, and the sign is not the trigger: `malloc(0xFFFFFFFFFFFFFFFCUL)` reproduces it under `--no-slice` alone. `--no-simplify` merely disabled the pre-existing negative-size guard (`do_simplify` is a no-op under it, so the guard never saw a constant) and `--no-slice` merely kept the otherwise-dead allocation in the equation. The real boundary is a layout limit and is exact: `1UL<<63` is fine, every size `>= 2^64 - 16` is vacuous, because `init_pointer_obj` asserts `end == start + size` **and** `end >= start` while `start` is past the NULL object at address 0 and aligned to `max_alignment()` (16). Reached in the corpus via `github_1631_compact`, whose `--compact-trace` sets `no-slice` implicitly (`command_line_options.cpp:410`). **No flag is needed at all**: an underflowing size such as `malloc(len - 4)` with `len < 4` widens to a huge `size_t`, and when the result is *used* the slicer keeps the allocation, so plain `esbmc file.c` goes vacuous. `default_underflow_malloc` pins that. | `smt_memspace.cpp` `init_pointer_obj`; fixed in `symex_mem`, `src/goto-symex/builtin_functions/memory_alloc.cpp`. `regression/esbmc/no_simplify_no_slice_huge_malloc` (KNOWNBUG → **CORE**), `default_underflow_malloc` (CORE, default flags), `no_slice_unrepresentable_malloc` (CORE, positive literal), `..._malloc` (CORE control) | **H-C2** | Fixed: classify the request on an unconditionally simplified copy so `--no-simplify` cannot blind it, and fail any allocation the address space cannot lay out by returning NULL, as real allocators do. Residual **R25** covers the symbolic-size form. |
 | **R23** | **High (false SUCCESSFUL *and* false FAILED, default configuration)** — **confirmed with a two-line reproducer** by M8 triage, §15 M8 (cont. 7); filed as **#6589** | **Compound assignment narrows the right operand to the left operand's type before the operation.** C11 **6.5.16.2p3**: "A compound assignment of the form E1 op= E2 is equivalent to the simple assignment expression E1 = E1 op (E2), except that the lvalue E1 is evaluated only once". ESBMC violates that equivalence for every left operand narrower than `int`. `char b; b += a;` emits `!overflow("+", (signed int)b, (signed int)((signed char)a))` — the right operand cast to `char` — where `b = b + a` correctly emits `!overflow("+", (signed int)b, a)`. Both directions are reachable and both are wrong: with `b = 3, a = INT_MAX`, `b += a` reports **SUCCESSFUL** (the overflow claim is unfalsifiable, a **missed bug**) while `b = b + a` reports FAILED; and with `char b = 100; int a = 256`, `b /= a` reports **FAILED "division by zero"** because the divisor narrows to `(char)256 == 0`, where C gives `100 / 256 == 0` and gcc/UBSan agree. Not bitfield-specific — `char`, `short`, struct members and bitfields all reproduce; the discriminator is *narrower than the promoted type*, not the member/bitfield spelling. `github_162_fail` is where it was found, and its claim is vacuous for exactly this reason — but that entry is a *wrong test* independently of R23, see §15 M8 (cont. 8). **Frontend, not goto-symex**, so it is outside §2.3's scope, but it is a soundness defect in extremely common C. **Fixed, §15 M8 (cont. 8).** | `clang_c_convertert::get_compound_assign_expr`, `clang_c_convert.cpp:4258-4343`, specifically the unconditional `gen_typecast(ns, rhs, lhs.type())`, together with `goto_convertt::remove_assignment`, `goto_sideeffects.cpp:1714-1870`, which took the operation's type from `expr.op0()`. `regression/esbmc/compound_assign_narrow_overflow`, `..._explicit` (control) and `compound_assign_narrow_divzero`, all CORE | M8 triage | Done. The frontend records clang's `getComputationResultType()` on the side effect; `remove_assignment` performs the operation there and converts the result back on assignment. |
@@ -724,7 +736,26 @@ this document** — each is a prioritised target for the cited harness.
 | **R35** | **High (missed bug, default configuration)** — found by R34's controls, §15 M9 (R34); **FIXED**, §15 M9 (R35) | **A write below an object's base is neither performed nor flagged.** `char *base = (char *)&s; *(int *)(base - 4) = 42;` on a 16-byte stack struct reports `VERIFICATION SUCCESSFUL`: the `object-out-of-bounds` claim **passes**, the struct is unchanged, and a neighbouring local is unchanged — the store lands nowhere. The symmetric overflow `*(int *)(base + 16) = 42` **is** caught, so the bound is checked on one side only. Independent of R34: it reproduces through `char *`, which never had the sign defect, and the pointer model again disagrees with the check — `__ESBMC_POINTER_OFFSET` is `-4` and `__ESBMC_same_object` holds | the sign is discarded by `value_sett::to_expr`'s `gen_ulong`, but the wrapped constant is not flagged either; probes in the §15 M9 (R34) entry | `regression/esbmc/deref_negative_offset{,_fail}` (both CORE) | **Fixed**: the check is rearranged to `offset > data_sz - access_sz`, equivalent over the integers and free of the wrap. The unsigned reading is kept — a negative offset stays "a huge address", it is simply now compared without an addition that can carry it back into range. The pre-fix symptom was LP64-only — the wrap needed a 64-bit `unsigned long` — so the pin no longer needs `REQUIRES lp64_host` |
 | **R36** | **High (no verdict, then spurious counterexample, default configuration)** — found by code review of R35's fix, §15 M9 (R36) | **Relational comparison read pointer offsets unsigned, so a pointer below its object sorted above the base.** `char *b = a; char *below = b - 1;` gives `below >= b` — `assert(!(below >= b))` fails while `__ESBMC_POINTER_OFFSET(below) == -1` verifies on the same expression. The consequence is that `for (p = end; p >= begin; p--)` **never terminates**: the guard stays true below the base, so the loop exhausts its unwinding bound and then dereferences out of bounds — one unwinding-assertion failure and one spurious out-of-bounds report on a program gcc runs clean. `convert_ptr_cmp` did `typecast2tc(uint, pointer_offset2tc(sint, side))`; the stated reason was that an object larger than half the address space would flip the sign of its upper offsets, but that object is already unrepresentable in the signed `pointer_offset2t` every other consumer reads | `src/solvers/smt/smt_memspace.cpp`, `convert_ptr_cmp`; the cast dates to `79c621ff20` (#1537), which changed the cross-object arm and carried the unsigned reading in unremarked | `regression/esbmc/ptr_rel_below_base{,_fail}` | **Fixed**: drop the two typecasts and compare the signed offsets. The lexicographic object-id step is untouched, so cross-object ordering — the only thing #1537 was about — is unchanged, and it is still a total order |
 | **R37** | **Low (spurious counterexample and missed bug, but unreachable below an 8 EiB allocation)** — found by code review of R36's fix, §15 M9 (R36) | **An offset at or above `2^63` reads negative in the pointer comparator.** `char *p = malloc(n); char *q = p + n; assert(q >= p);` — defined by C11 6.5.8p5 — reports `FAILED` with `n = 0x8000000000000000`. The signed reading R36 installs is a *convention*: `pointer_struct`'s offset member is `ptraddr_type2()`, full unsigned width, and `memory_alloc.cpp` caps allocations just under `2^64`, so the huge object is representable and reachable. Both error directions exist — a guarded branch on such a pointer is pruned instead. This is the residual R36 knowingly accepts, the two readings being mutually exclusive | `src/solvers/smt/smt_memspace.cpp` `convert_ptr_cmp`; `pointer_struct` in `smt_solver.cpp`; the allocation cap in `memory_alloc.cpp` | `regression/esbmc/ptr_rel_huge_object` (KNOWNBUG) | Open: capping allocations at `PTRDIFF_MAX` would make the signed reading exact — C11 6.5.6p9 already requires `ptrdiff_t` to represent any in-object difference, and the model computes that difference signed. Verify the glibc precedent before citing it |
+| **R43** | **Medium–High (no verdict, default configuration)** — found by a loop-bound spelling census, §15 M9 (R43); **FIXED**, same entry | **A loop whose end is spelled `&a[n]` never terminates.** `for (int *p = a; p != &a[4]; ++p)` unwinds forever under default flags: `expr2t::simplify` returned nil for every `address_of`, so `&a[4]` never became `&a[0] + 4` and the guard was never decided against the `a + k` the induction variable carries. Spelling the same bound `a + 4` folds, which is why the shape survived — one spelling of the idiom works and the other hangs | `expr2t::simplify`'s `address_of_id` early return, `src/util/expr/expr_simplifier.cpp`; the skipped fold is `address_of2t::do_simplify` in the same file | `regression/esbmc/addressof_index_bound{,_fail}` | **Fixed**: normalise `&base[c]` to `&base[0] + c` on the operands of `equality2t`/`notequal2t` only, so the two spellings of a bound meet at the comparison that has to decide them. The `address_of_id` early return stays — running the fold on *every* address_of costs the value-set analysis the concrete offset and k-induction stops converging, see the entry |
+| **R45** | **Medium–High (no verdict, default configuration)** — found by a trip-count *bound* census rather than an address one, §15 M9 (R45); **FIXED**, same entry | **A pointer difference stops folding as soon as a cast or a member is involved.** R30's fold (#6783) matched a bare `address_of` of an `index2t`, so `(char *)&a[4] - (char *)&a[0]` — the idiomatic byte distance — and `&p.b - &p.a` both stayed unfolded and a loop bounded by either never exited. The value is available throughout: `assert(n == 4)` on the same bound proves on an unpatched build | `fold_index_difference`, `src/util/expr/expr_simplifier.cpp`; 16-shape bound census plus 8 difference-shape probes | `regression/esbmc/{member,byte}_address_difference{,_fail}` | **Fixed**: decompose both operands into root object plus constant byte offset, through casts and members alike, and divide the distance by the operands' own pointee type. Residual: `offsetof` lowers to `POINTER_OFFSET(&0->b)`, and `pointer_offset2t` over a constant-offset address has no fold at all |
+| **R46** | **Medium (no verdict, default configuration)** — R45's named residual, closed the next hour, §15 M9 (R46); **FIXED**, same entry | **A loop bounded by `offsetof` never exits.** `offsetof` lowers to `(char *)(struct S *)NULL + k`, and `pointer_offset2t`'s NULL arm folded to zero only when the pointee was *not* a symbol type — which is every struct and union, so the only shape `offsetof` produces was the only shape the fold refused. The guard arrived with the arm in #2803 with no rationale recorded, and NULL is object 0 at offset 0 whatever it points to | `pointer_offset2t::do_simplify`, `src/util/expr/expr_simplifier.cpp`; 8-shape `offsetof` census | `regression/esbmc/offsetof_loop_bound{,_nested,_fail}` | **Fixed**: drop the pointee restriction. Removing a live guard is not a C-Dead obligation — the census names the five shapes that change and the suite sweep shows nothing else does |
+| **R44** | **Medium–High (no verdict, default configuration)** — found by R43's own open census row, §15 M9 (R44); **FIXED**, same entry | **A flat walk across a 2-D array never terminates.** `address_of2t::do_simplify` rebases only the innermost subscript, so `&a[1][2]` becomes `&(a[1])[0] + 2` while a pointer started at `&a[0][0]` carries `&(a[0])[0] + k`; the two bases differ and the guard is never decided. Two addresses in the same row already met, which is what made the shape read as a rank problem. R43's `<` row (c08) was also unmeasured: the ordered relations never had the normalisation at all | `normalize_addressof_index` and `simplify_relations`, `src/util/expr/expr_simplifier.cpp`; R43's own c06 census row | `regression/esbmc/nested_index_bound{,_lt,_fail}`, `nested_member_index_bound{,_fail}` | **Fixed**: rebase both operands on a chain with every subscript zeroed, counting the offset in the pointer's own pointee type so member steps join the same rewrite; reach it through pointer arithmetic so both sides move together; and give the ordered relations the normalisation `equality2t`/`notequal2t` already had. Residual: a walk whose two ends reach *different* members does not share a base |
+| **R47** | **Medium (no verdict, default configuration)** — found by a guard-*shape* census rather than a bound one, §15 M9 (R47); **FIXED**, same entry | **Every descending pointer walk hangs; every ascending twin folds.** The guard is `add(&a[4], k) != &a[0]`: the add's base keeps its own subscript, so it never meets the bare bound beside it. A decrement also never reaches the `base + offset` shape an increment has. Four other mechanisms were measured and refuted first, including a real missing `sub2t` arm in `constant_propagation` that changes no verdict | 18-shape guard census; `sub2t::do_simplify`, `src/util/expr/expr_simplifier.cpp` | `regression/esbmc/descending_pointer_walk{,_fail}` | **Fixed**, in two steps: `p - c -> p + (-c)` for a signed constant gives a decrementing walk the shape an incrementing one has, and giving `flatten_addressof_under_add` the single-subscript fallback the top level already had rebases the `&a[4]` inside `&a[4] + k`. 18/18 of the census folds |
+| **R48** | **Medium–High (no verdict, default configuration)** — found by a bound-*storage* census extending R42–R47, §15 M9 (R48); **FIXED**, same entry | **A nested member write into a struct with no propagated value drops the whole struct.** `struct S{struct I in;}; struct S x; x.in.n = 4;` then `for (i = 0; i < x.in.n; i++)` never terminates under default flags, while the flat `x.n = 4` spelling of the same program proves `SUCCESSFUL` in 0.4 s. `constant_propagation`'s struct arm walks the `with` chain and then requires its base not to be a `member2t`, and a nested member write spells that base as exactly that — `x#1.in`, the old value of the field being updated — so the inner update is refused, the outer one becomes non-constant, and the bound stays symbolic. The equation is right: a bare `assert(x.in.n == 4)` on the same program proves. Only `symex_goto`'s syntactic exit decision (R30) cannot see the value. | the 20-shape storage census and its 6 controls, §15 M9 (R48); `goto_symex_state.cpp:322`; `regression/esbmc/nested_member_loop_bound{,_fail}` | **H-C2** | Fixed by removing the clause. The base is already renamed, so the propagated value is as self-contained as the flat `with(x#1, n, 4)` the same arm already keeps, and the array arm added by the same commit (#2845) never carried the restriction. Eight nested shapes hang on the base build and decide on the patched one. |
+| **R49** | **Medium–High (no verdict, default configuration)** — found by probing the sibling arms of R48's fix, §15 M9 (R49, R50); **FIXED**, same entry | **A union `with` chain touching two fields is refused, so a bound stored in the last-written field never folds.** `union U{int a; short b;}; u.b=1; u.a=4;` then `for (i = 0; i < u.a; i++)` never terminates. The arm requires every update in the chain to name the same field, reasoning that union members alias — which is true and already enforced by `member2t::do_simplify`, which refuses to step past a `with` whose source is a union. The gate was denying itself a value the simplifier handles correctly. | seven before/after probes, §15 M9 (R49, R50); `goto_symex_state.cpp:351-393`; `regression/esbmc/union_mixed_field_{bound,bound_fail,aliased_fail}` | **H-C2** | Fixed by dropping the same-field requirement. Every read aliased by a *later* sibling write still refuses to fold, at all three widths probed (`int` over `int`, `short` over `int`, a `char[4]` byte over `int`), so the relaxation buys termination and not a wrong answer. The residual is a struct-typed update into a union, which the arm still declines because it gates on `is_constant_expr` where the struct arm gates on `constant_propagation`. |
+| **R50** | **Medium (no verdict, default configuration; a wrong answer and a solver abort behind a correct guard)** — found beside R49, §15 M9 (R49, R50); **FIXED at two dimensions**, §15 M9 (R50); deeper nesting is the open residual | **A bound stored in a multi-dimensional array never folds, because propagating the array would break the encoder.** `int a[2][2]; a[1][1]=4;` looped to `a[1][1]` hangs. `array_may_propagate` declined any multi-dimensional array that is not wholly constant. Ablating that clause makes the bound fold **and** breaks the encoder two ways: a read of the updated row at a nondet index aborts with `bitwuzla: error: ... expected array term at index 0`, and a row carrying **two** stores silently loses the older one, because `decompose_store_chain` walks only the newest update's spine. The gate's own comment named both modes; R50's row recorded only the aborts, because only the aborts had been measured. The second failure is a wrong answer, not a crash: `a[1][0]=5; a[1][1]=4;` read back through a row pointer returns `FAILED` on a correct program, and so does a `memcpy` between two rows. | the three-configuration mutation matrix, §15 M9 (R50); `array_may_propagate` at `goto_symex_state.cpp:148`; `decompose_store_chain` at `smt_solver.cpp:2724`; `regression/esbmc/nested_array_{loop_bound,row_alias,row_phi_merge,row_via_pointer,row_memcpy,plane_memcpy,vla_row}{,_fail}` | **H-C2** | Fixed in the encoder first, exactly as this row's earlier recommendation required, and only then in the gate. `lower_flattened_row_select` gives a read out of a row an encoding by pushing it inside the `with` (select-over-store); `decompose_stores` normalises a whole chain — including every store a row carries — into flat element stores. The gate relaxes to **two** dimensions only: past that, a nested row's leaves are a two-level index chain that `decompose_select_chain` flattens straight past the enclosing `with`, and the same programs abort. The 3-D bound is **R51**, closed the same day; `expand_row_stores`' element enumeration, which is quadratic and not bounded by R42's cap, stays open. A further consequence, **R52**, surfaced while gating the 3-D fix: the propagated chain this row creates is a DAG, and the walks over it were unmemoised. |
+| **R51** | **Medium (no verdict, default configuration)** — R50's named residual, closed the same day, §15 M9 (R51); **FIXED**, same entry | **A bound stored three dimensions deep never folds.** `int a[2][2][2]; a[1][1][1] = 4;` looped to `a[1][1][1]` never terminates, while the 2-D spelling R50 fixed proves in 0.4 s. R50 left the propagation gate bounded at two dimensions because lifting it aborted every solver: a read out of a *nested* row roots its select chain at a row-valued `with`, and `convert_ast` has no term for one. The gate was the only producer, so the gap was latent — the hang was not. | the three-column mutation matrix, §15 M9 (R51); `lower_flattened_row_select` at `smt_solver.cpp:2825`; `array_may_propagate` at `goto_symex_state.cpp:126`; `regression/esbmc/nested_array_{3d_loop_bound,3d_outer_read,3d_middle_read,3d_row_pointer,3d_phi_merge,3d_row_memcpy,4d_outer_read}{,_fail}` | **H-C2** | **Fixed**, encoder first and gate second, as R50's sequence required. `lower_flattened_row_select` becomes `push_row_read`, which pushes a subscript through a row's own structure at every level rather than only the outermost: select-over-store for a `with`, distribution over an `ite`, and the inner read first when the row is itself read out of a deeper one. The last arm fires only when the chain roots at a row, so no 2-D read reaches it -- measured; the `ite` recognition does widen the entry gate for 2-D too, which can only replace an abort. With no row left unencodable the gate's dimension clause goes entirely — four dimensions decide as readily as three — and R42's 256-element cap is the only bound left. R50's own fix to `expand_row_stores` turns out to need no change: the reads it names lower through the same arms. |
+| **R50** | **Medium (no verdict, default configuration; a wrong answer and a solver abort behind a correct guard)** — found beside R49, §15 M9 (R49, R50); **FIXED at two dimensions**, §15 M9 (R50); deeper nesting is the open residual | **A bound stored in a multi-dimensional array never folds, because propagating the array would break the encoder.** `int a[2][2]; a[1][1]=4;` looped to `a[1][1]` hangs. `array_may_propagate` declined any multi-dimensional array that is not wholly constant. Ablating that clause makes the bound fold **and** breaks the encoder two ways: a read of the updated row at a nondet index aborts with `bitwuzla: error: ... expected array term at index 0`, and a row carrying **two** stores silently loses the older one, because `decompose_store_chain` walks only the newest update's spine. The gate's own comment named both modes; R50's row recorded only the aborts, because only the aborts had been measured. The second failure is a wrong answer, not a crash: `a[1][0]=5; a[1][1]=4;` read back through a row pointer returns `FAILED` on a correct program, and so does a `memcpy` between two rows. | the three-configuration mutation matrix, §15 M9 (R50); `array_may_propagate` at `goto_symex_state.cpp:148`; `decompose_store_chain` at `smt_solver.cpp:2724`; `regression/esbmc/nested_array_{loop_bound,row_alias,row_phi_merge,row_via_pointer,row_memcpy,plane_memcpy,vla_row}{,_fail}` | **H-C2** | Fixed in the encoder first, exactly as this row's earlier recommendation required, and only then in the gate. `lower_flattened_row_select` gives a read out of a row an encoding by pushing it inside the `with` (select-over-store); `decompose_stores` normalises a whole chain — including every store a row carries — into flat element stores. The gate relaxes to **two** dimensions only: past that, a nested row's leaves are a two-level index chain that `decompose_select_chain` flattens straight past the enclosing `with`, and the same programs abort. **One residual stays open** — the 3-D bound. `expand_row_stores`' element enumeration is quadratic but **is** bounded by R42's cap, at 65,408 stores and 0.67 s, §15 M9 (R50 residual); the belief that the `memcpy` layer bypasses the cap was wrong. A third consequence, **R52**, surfaced while gating the 3-D fix: the propagated chain this row creates is a DAG, and three walks over it were unmemoised. |
+| **R52** | **Medium (no verdict, `--no-simplify`)** — found while gating R51's fix, §15 M9 (R52); **FIXED**, same entry | **A propagated multi-dimensional array is walked as a tree, and it is a DAG.** Each store references the chain twice — once as the `with` source, once inside the `index` of the row it updates — so a walk that does not memoise visits paths exponential in the store count. `int a[8][8]` with 32 element writes under `--no-simplify` does not terminate: 131 s and 18.4 GB and still climbing, against 0.27 s and 84 MB once memoised. The default configuration is unaffected, because the simplifier folds the chain before any of these walks see it. R50's fix is what creates the shape, so this row is its consequence and not a pre-existing defect; R51 only widens which programs reach it. | a store-count ladder against three binaries, §15 M9 (R52); `get_original_name` at `renaming.cpp:347`, `pre_register_addresses` at `symex_target_equation.cpp:30`, `get_value_set_rec` at `value_set.cpp:603`; `regression/esbmc/nested_array_no_simplify_scale{,_fail}` | **H-C2** | Fixed by memoising all three walks. `get_original_name` caches **shared nodes only** — caching every node holds the original alive, which forces `irep_container::detach()` to clone even an unshared one and breaks the in-place rewrite `goto_symex_statet::assignment` relies on. A depth cap is **not** the fix: 2-D at 64 stores and 3-D at 256 stores both exhaust memory, so the wall is the store count, not the nesting. The fourth walk, `migrate_expr_back`, is memoised too, §15 M9 (R52 residual). **One residual stays open**, and it is no longer a walk: the text `--ssa-trace` and `--show-vcc` print is itself exponential in the store count, because the format expands a DAG into a tree. |
+| **R59** | **Medium–High (no verdict, default configuration)** — R44's residual, measured on well-defined C, §15 M9 (R59); **FIXED**, same entry | **A byte-wise walk bounded by another member's address never exits.** `for (char *p = (char *)&s.a[0]; p != (char *)&s.a[1]; ++p)` reads the object representation, which C allows, and has a constant trip count, yet symex unwinds it without end: the guard `(char *)&s.a[0] + k != (char *)&s.a[1]` never folds, because the relation normalisation saw no address under the casts. Walking between two members, over an array of structs, a union or a packed struct fails the same way; `--unwind` or `--smt-symex-guard` decide it at once. | `byte_address_on_root`, `cancel_shared_pointer_base`, `src/util/expr/expr_simplifier.cpp`; `regression/esbmc/char_walk_{one_member,members,arrays}{,_fail}`, `char_view_through_pointer{,_fail}` | — | **Fixed**: a byte view of a member/index chain over a named struct, union or non-byte array becomes one canonical `(char *)&root` anchor plus a constant byte offset, so both ends cancel, and a bare byte base compares as `base + 0`. |
+| **R64** | **High (a constructor called on no object, and a surplus destructor, default configuration)** — found driving WI-4, §15 M9 (G18, R64, WI-4); **FIXED**, same entry | **A class member initialised from a prvalue of its own class got a second object.** `C impl_ = C::make();` copied a temporary into the member and destroyed it; `C impl_ = C{&x};` called the constructor with no object and copied a nondet temporary in; `M() : impl_{C::make(&x)}` was read as aggregate init, storing the temporary's address. immer's `impl_t impl_ = impl_t::empty();` is the converting-constructor form, and its surplus `~champ` freed the static empty node. | `member_result_object`, `src/clang-cpp-frontend/clang_cpp_convert.cpp`; `regression/esbmc-cpp/cpp/member_init_{prvalue_dtor,prvalue_value,braced_prvalue,const_prvalue,functional_cast,elided_copy,converting_ctor}{,_fail}` | — | **Fixed**: the member is the prvalue's result object ([dcl.init]/17.6.1), so the constructor or call builds it directly. |
+| **R53** | **High (false SUCCESSFUL, default configuration)** — found by the G14 re-measure of self-verification, §15 M9 (G14, R53); **FIXED**, same entry | **Template specialisations that differ only in a member-pointer argument share one symbol.** Functions, methods, parameters and variables take clang's USR as their id, and the USR spells a member-pointer type argument as nothing: `get<int A::*>` and `get<long B::*>` are both `c:@F@get<# >#S0_#`, so the last body converted wins for both. A trait read through `get` returns the wrong specialisation's value, and `assert(get(&A::b) == 2)` reports **SUCCESSFUL** under Bitwuzla and Z3 where the native binary aborts. Members of `W<int A::*>` and `W<long B::*>` collide the same way, and so do plain overloads `f(int A::*)` and `f(long B::*)` (`c:@F@f# #`). Records are unaffected: their ids are fully qualified names, which spell `int A::*`. | `clang_cpp_convertert::get_decl_name`, `src/clang-cpp-frontend/clang_cpp_convert.cpp`; `regression/esbmc-cpp/cpp/member_pointer_{,class_}template_arg{,_fail}`, `member_pointer_overload{,_fail}`, `member_pointer_var_template{,_fail}`, `member_pointer_make_tuple`, `nullptr_template_arg{,_fail}` | §13 G14 | **Fixed**: a USR-derived id whose enclosing template arguments or function types print a member pointer gets that text appended; every other id is unchanged. A `nullptr` template argument, spelled as nothing too, is covered by recording its type. |
+| **R54** | **High (false SUCCESSFUL, default configuration, C and C++)** — found while chasing G18, §15 M9 (R54); **FIXED**, same entry | **Same-named local classes share one record.** A named record takes its id from `getFullyQualifiedName`, which omits the enclosing function, so `struct S` in `f` and `struct S` in `g` are one `tag-struct S`, and the second definition is read through the first's layout. In C, two local `struct S` with their members in opposite orders make `*(int *)&s = 7; return s.a;` return 7 in both functions, and a program that aborts natively reports **SUCCESSFUL** under Bitwuzla and Z3. Other layouts abort in `assert_type_compat_for_with` (`irep2_expr.cpp:333`) or `member2t`. A class template specialised on such a class, `Box<S>`, collides the same way. | `clang_c_convertert::get_decl_name`, `src/clang-c-frontend/clang_c_convert.cpp`; `regression/esbmc/local_struct_{same_tag,nested_macro}{,_fail}`, `regression/esbmc-cpp/cpp/local_{class,enum,member_pointer}_template_arg{,_fail}` | — | **Fixed**: a local record's name gains its enclosing function's id and the definition's line, column and, inside a macro, the raw encoding of its macro location. A record that is, or is a member of, a class template specialisation gains the ids of the function-local declarations among its arguments: records, enums and declaration arguments, through packs, pointers, references, arrays, function types, member pointers and nested specialisations. The suffix is identifier-shaped for goto2c. **Residuals**: locals of blocks and captured regions; two same-named *variables* in one macro expansion, whose clang USRs share the expansion location. |
+| **R55** | **High (false SUCCESSFUL, default configuration, C++)** — the root cause of G18, found by reducing it, §15 M9 (G18, R55); **FIXED**, same entry | **A function-local static's dynamic initializer ran before `main`.** `get_var` hoisted every static initializer into `static_lifetime_init`, which is right for C, where it is a constant expression, and wrong for C++, where it runs on the first pass through the declaration ([stmt.dcl]/3). `int bump() { return ++g; } void n() { static int c = bump(); }` never calls `n`, yet `assert(g == 1)` in `main` reports **SUCCESSFUL**; calling `n` twice made correct programs FAILED, and a class-typed static was constructed before `main` from whatever its arguments held then. | `clang_c_convertert::get_var`, `src/clang-c-frontend/clang_c_convert.cpp`; `goto_convertt::convert_decl`; `regression/esbmc-cpp/cpp/static_local_*` | — | **Fixed**: such a static is zero-initialised, the frontend adds an `<id>$init_guard` symbol, and `convert_decl` lowers the declaration to `atomic { if (!guard) { init; guard = 1; } }`, constructing in place through `convert_decl_initializer`. **Residuals**: arrays keep the hoisted form; `--clang-cpp-irep2-adjust-only` keeps it too; exit-time destructors of statics are not modelled, before or after. |
+| **R56** | **High (false SUCCESSFUL, default configuration, C and C++)** — R54's variable residual, §15 M9 (R56); **FIXED**, same entry | **Two same-named locals declared by one macro expansion share one symbol.** A local variable's id is its clang USR, which encodes the expansion offset, so `{ unsigned char s = 200; } { int s = 1000; r2 = s; }` from one macro gives one `c:t.c@113@F@main@s` of type `unsigned char`, the second block stores 1000 into it, and `assert(r2 == 232)` reports **SUCCESSFUL** under Bitwuzla and Z3 where native C reads 1000. | `clang_c_convertert::get_decl_name`; `regression/esbmc/macro_local_same_name{,_fail}` | — | **Fixed**: a local variable declared inside a macro expansion gains its macro location's raw encoding, which is unique per expanded token; a spelling offset, the first version, did not separate an inner macro expanded twice inside one outer expansion. |
+| **R57** | **Medium (no verdict, C++20)** — found by review of R53's fix, §15 M9 (R57); **FIXED**, same entry | **A class-type template argument aborts the frontend.** `template <S s> int g() { return s.x; }` used as `g<S{1}>()` exits with `ERROR: Unable to generate the USR`: clang's USR generator gives up on the specialisation, on its constructors and parameters, and on the template parameter object `S{1}` names. The object has no declaration ESBMC converts, so a reference to it had no symbol either. | `clang_c_convertert::get_decl_name`, `clang_cpp_convertert::get_decl_name`, `get_decl_ref`; `regression/esbmc-cpp/cpp/class_nttp_{param_object,class_template}{,_fail}` | — | **Fixed**: when the USR fails, the id falls back to the Itanium mangled name (complete-object variants for constructors and destructors; a parameter is named after its function), and the parameter object gets a static symbol valued by its `APValue` on first reference ([temp.param]/8). |
 | **R41** | **Medium (spurious counterexample, `--ir-ieee`)** — found by re-measuring §15 M9 (side finding 2), whose enclosure diagnosis it refutes; **FIXED**, §15 M9 (R41) | a float symbol's real value is unconstrained between max_normal and the infinity sentinel, so `|x| > max_normal` and `x == INFINITY` disagree about the same value and `IEEE_MUL`'s invalid-operation arm gives `0*f` a NaN predicate | `smt_solver.cpp` `convert_terminal`, `ir_ieee_conv.cpp` `is_inf_real` | `regression/floats/ir_ieee_symbol_magnitude` | Assert `|x| <= max_normal \| |x| == sentinel` alongside the existing subnormal-gap axiom. |
+| **R42** | **Medium–High (no verdict, default configuration)** — found by a trip-count shape census extending R30, §15 M9 (R42); **FIXED**, same entry | **A loop bounded by a constant element of a multi-dimensional array never terminates.** Constant propagation excluded every multi-dimensional array since 2017, so `t[0][0]` stays symbolic, `is_false(new_guard)` never fires and the loop unwinds forever. 1-D folds; 2-D and 3-D do not, whether initialised, `const`, `static`, assigned, or reached through a flat or row pointer | `goto_symex_statet::constant_propagation`, `goto_symex_state.cpp`; census of 20 trip-count shapes, 8 of 15 array shapes hung | R30's census method | Bound the exclusion by element count rather than dropping it: the gate had an unrecorded reason and removing it outright costs 11x on a 64x64 array. |
 | **R37** | **Low (spurious counterexample and missed bug, but unreachable below an 8 EiB allocation)** — found by code review of R36's fix, §15 M9 (R36); **FIXED**, §15 M9 (R37) | **An offset at or above `2^63` reads negative in the pointer comparator.** `char *p = malloc(n); char *q = p + n; assert(q >= p);` — defined by C11 6.5.8p5 — reports `FAILED` with `n = 0x8000000000000000`. The signed reading R36 installs is a *convention*: `pointer_struct`'s offset member is `ptraddr_type2()`, full unsigned width, and `memory_alloc.cpp` caps allocations just under `2^64`, so the huge object is representable and reachable. Both error directions exist — a guarded branch on such a pointer is pruned instead. This is the residual R36 knowingly accepts, the two readings being mutually exclusive | `src/solvers/smt/smt_memspace.cpp` `convert_ptr_cmp`; `pointer_struct` in `smt_solver.cpp`; the allocation cap in `memory_alloc.cpp` | `regression/esbmc/ptr_rel_huge_object` (CORE), `regression/esbmc/alloc_ptrdiff_max`, `alloc_above_ptrdiff_max`, `alloc_ptrdiff_max_fail` | **Fixed for `malloc`**, §15 M9 (R37): the cap is `PTRDIFF_MAX`, which puts every *defined* offset of a `malloc`ed object below `2^63` and so makes the signed reading exact there. `alloca` and `realloc` are **not** capped and still reproduce the row's witness verbatim — registered as **R38**. Note the standard argument runs the other way from what this row first claimed — see the entry |
 | **R38** | **Low (spurious counterexample and missed bug, but unreachable below an 8 EiB allocation)** — found by code review of R37's fix, §15 M9 (R38); **FIXED**, §15 M9 (R38 fix) | **R37 survives through `alloca` and `realloc`.** The `PTRDIFF_MAX` cap R37 installs is gated on `is_malloc`, and `symex_realloc` never bounds its size at all, so both still lay out an object whose upper offsets alias the below-base encoding. `char *p = alloca(n); char *q = p + n; assert(q >= p);` reports `FAILED` at `n = 0x8000000000000000` — the same witness value R37's row records — and the `realloc` spelling fails at `0xFFFFFFFFFFFFFFDF`. The `malloc` spelling of the same program verifies, so the three allocation paths now disagree about the same property | the `is_malloc` gates on the size guards in `src/goto-symex/builtin_functions/memory_alloc.cpp`; `goto_symext::symex_realloc`, which hands its size straight to `create_dynamic_memory_symbol` | `regression/esbmc/ptr_rel_huge_object_alloca`, `ptr_rel_huge_object_realloc` (both now CORE), `ptr_rel_huge_object_force_success` (KNOWNBUG), `force_malloc_success_negative_indirect` | **FIXED**, §15 M9 (R38 fix): `alloca` bounds by assumption (it has no failure outcome to report), `realloc` joins the cap to its failure condition after the zero-size check. Both recorded obstacles dissolved — `getenv` never needed changing, and the 400 s blow-up belonged to the reverted attempt's shared helper. **Residual, measured and left open**, §15 M9 (R38 residual): under `--force-malloc-success` and `--force-realloc-success` the cap is not applied, since assuming it away would prune a negative-size request vacuously. Exempting that case by inspecting the argument's syntax was built and **refuted** — one intervening assignment (`size_t n = a; malloc(n)`) hides the typecast, the cap is assumed anyway, and a reachable `assert(0)` becomes a false SUCCESSFUL. Every other cut is worse or costs the >400 s M9 (R37) measured. The defect stays confined to allocations at or above 8 EiB |
 | **R39** | **High (false SUCCESSFUL, default configuration)** — found by code review of R38's fix, §15 M9 (R39); **FIXED**, same entry | **The cap's *constant* arm is still gated on `is_malloc`, and above the layable bound that is a vacuous proof.** R38 un-gated the symbolic arm; the constant classification at `memory_alloc.cpp:671` — #6660's, which returns NULL for a request `malloc` cannot serve — was left `malloc`-only. `char *p = __builtin_alloca(-1); p[0] = 1; assert(0);` reports **`VERIFICATION SUCCESSFUL`**: the request exceeds `max_layable_size()`, the address-space constraint is unsatisfiable, and every execution is pruned — R25's mechanism, surviving in the path #6660 did not classify. Between `PTRDIFF_MAX` and that bound the same gate reproduces R38's witness verbatim, at a *constant* size. The `malloc` spelling of both programs is correct | the `is_malloc` gate on the constant arm of `goto_symext::symex_mem`, `src/goto-symex/builtin_functions/memory_alloc.cpp`; pre-existing since **#6660** | `regression/esbmc/alloca_const_above_layable`, `ptr_rel_huge_object_alloca_const`, `alloca_ptrdiff_max` (all CORE) | **Fixed**: classify a constant request for either path, and report it for `alloca` (`alloca: size exceeds PTRDIFF_MAX`) rather than bounding it by assumption. The asymmetry with R38's symbolic arm is the principle — an assumption that prunes *some* UB executions is a bound, one that prunes *all* of them is a vacuous proof. NULL is handed back so no unrepresentable object is laid out; it does not model a failure C defines, the claim has already reported the program. **`--multi-property` masks the whole defect** — per-claim slicing drops the allocation, so the same program is `FAILED` under it and `SUCCESSFUL` by default |
@@ -824,7 +855,7 @@ per-oracle baseline of known divergences (each triaged to a filed issue or a
 justified waiver — **an untriaged divergence is a blocker, not a baseline**).
 **Closed, §15 M7.** H-C3 (1269/0), H-C5 (1360/0), H-C6 (0 violations, 44 of 163
 tests exercising the relation), H-B8 (1358/3 → **R19**) and H-C7 (326 compared,
-1 diverged) are run; `.github/workflows/symex-oracles.yml` wires all of them with
+1 diverged) are run; `.github/workflows/aux-symex-oracles.yml` wires all of them with
 per-leg baselines, all of which are now triaged and cited.
 
 **M8 — Previously-reported bugs and regression cases (0.5 wk, continuous).**
@@ -882,7 +913,7 @@ scripts/verification/symex/
     ├── oracle_common.py                      shared: args, run, verdict, baseline
     ├── baselines/<leg>.txt                   triaged divergences, one per leg
     └── drift_check.py                        transcription-drift guard
-.github/workflows/symex-oracles.yml           scheduled Tier-C job
+.github/workflows/aux-symex-oracles.yml       scheduled Tier-C job
 ```
 
 `<area>` ∈ `{ssa, merge, mergequeue, slice, unwind, mpor, frame, eqctx,
@@ -928,9 +959,9 @@ a reviewed re-transcription.
 |---|---|---|
 | Tier A (`regression/esbmc/symex_*`) | every PR, via the existing `ctest -L esbmc` path | each harness < 30 s; the suite's 120 s per-test harness cap is hard |
 | Tier B (`unit/goto-symex`) | every PR, `ctest -LE regression` | < 60 s total |
-| Tier C oracles | **scheduled**, `.github/workflows/symex-oracles.yml` — nightly `37 2 * * *` for C1/C2/C3, weekly `41 3 * * 0` for C4/C5/C6/B8 — plus `workflow_dispatch` | 120 min per leg, mirroring `sanitizers.yml`; `continue-on-error` during bring-up |
+| Tier C oracles | **scheduled**, `.github/workflows/aux-symex-oracles.yml`, called by `ci-nightly.yml` (`37 2 * * *`, C1/C2/C3) and `ci-weekly.yml` (`41 3 * * 0`, every leg) — plus `workflow_dispatch` on either | 120 min per leg, mirroring the sanitizer job; `continue-on-error` during bring-up |
 | Drift check | every PR touching `src/goto-symex/**` | seconds |
-| Sanitizers (Tier D) | existing `sanitizers.yml` (asan/ubsan/tsan) — add an **msan** leg for R10 | existing budget |
+| Sanitizers (Tier D) | the sanitizer job in `ci-weekly.yml` (asan/ubsan/tsan) — add an **msan** leg for R10 | existing budget |
 
 Per repo convention the local regression cap is **5 minutes**; a full-corpus
 Tier-C sweep is a CI-only activity and must never be run inside a PR loop.
@@ -994,7 +1025,7 @@ for what is claimed; a claim may not outlive its harness.
 | **D5** | Risk assessment (harness-design + code-level) | §9.1 / §9.2 | M0 |
 | **D6** | Tier-A harnesses: 10 kernels × {ok, fail} | `regression/esbmc/symex_*/` | M1–M6 |
 | **D7** | Tier-B suites (8 files) + working `unit/goto-symex` CMake wiring + drift guard | `unit/goto-symex/`, `scripts/verification/symex/drift_check.py` | M0, M4 |
-| **D8** | Tier-C oracle scripts + scheduled workflow | `scripts/verification/symex/`, `.github/workflows/symex-oracles.yml` | M5, M7 — **delivered except H-C7**, §15 M7 |
+| **D8** | Tier-C oracle scripts + scheduled workflow | `scripts/verification/symex/`, `.github/workflows/aux-symex-oracles.yml` | M5, M7 — **delivered except H-C7**, §15 M7 |
 | **D9** | `SYMEX_INVARIANT` release-checked macro + promoted invariants + cost benchmark | `src/goto-symex/` | M3 |
 | **D10** | Fix PRs for confirmed findings (R2–R5, R7, R10 are tractable; R6/R8/R11 are investigations first) | code PRs, each with Mode-C proof where a branch changes | M1–M6 |
 | **D11** | Verdict log — per-harness result, ESBMC commit, solver versions, date — appended to this document | §15 | continuous |
@@ -1091,6 +1122,65 @@ It is also the cheapest to close.
 > accepting `named_subt` is a QoI extension the OM is not obliged to match.
 > Closing G9 means either matching that extension in the OM's `map`, or changing
 > `named_subt` — and the second is an ESBMC-wide change, not an OM one.
+>
+> **Re-measured 2026-09-06 — parsing is no longer the blocker at all; see §15
+> M9 (self-verification re-measure).** `--parse-tree-only` over
+> `#include <goto-symex/renaming.h>` emits **zero** errors. The three-item boost
+> residue the M9 (G9) entry named — `std::basic_string_view` and
+> `std::basic_streambuf` absent as templates, `swprintf`/`vswprintf` undeclared
+> — is gone. G1–G11 are all closed and this table is closed with them.
+>
+> **The blocker moved one stage downstream, to conversion.** The same include
+> with an empty `main` now aborts in `clang_c_convert.cpp:2875` on
+> `assert(init_stmt.getNumInits() == 1)`. Two new items, both in the frontend
+> rather than the operational model, and neither in ESBMC's own headers:
+>
+> | ID | Blocker | Smallest failing include | Symptom |
+> |---|---|---|---|
+> | **G12** | An `InitListExpr` shape the converter's fallback arm does not accept, somewhere in `irep2_type.h`'s own body | `irep2/irep2_type.h` | `assert(init_stmt.getNumInits() == 1)` aborts the binary |
+> | **G13** | `__atomic_test_and_set` and `__atomic_clear` are unhandled `AtomicExpr` kinds | `util/symtab/symbol.h`, via boost's spinlock | `ERROR: Unknown Atomic expression` → `CONVERSION ERROR` |
+>
+> **G12 and G13 are fixed (G12 by #7702, #7801 and #7938; G13 by #7658), and the blocker moved into
+> symex as G14, 2026-09-24.** `irep2/irep2_type.h` and `goto-symex/state/renaming.h`
+> (the header moved in the `goto-symex/` split) then converted and aborted in
+> `symex_assign_member` on `assert_type_compat_for_with` (`irep2_expr.cpp:333`).
+> The cause was a frontend naming collision, **R53**; with it fixed both headers
+> reach `VERIFICATION SUCCESSFUL`. See §15 M9 (G14, R53).
+>
+> **G13 is not C++-specific and has nothing to do with the union it was first
+> attributed to.** `clang_c_convert.cpp:4620-4700` handles 21 `AO__atomic_*`
+> cases; a seven-builtin census found `__atomic_load_n`, `store_n`,
+> `fetch_add`, `exchange_n` and `compare_exchange_n` all verify, and only
+> `test_and_set` and `clear` fail. Three lines of C reproduce it:
+> `unsigned char c; int main(){ return __atomic_test_and_set(&c, __ATOMIC_ACQUIRE); }`
+>
+> **G12 is reduced but not fully isolated** (#7643). C-Reduce 2.10.0 takes
+> `irep2_type.h` from 586 lines to five, still aborting on the same assertion:
+>
+> ```cpp
+> #include <irep2/irep2.h>
+> class a : type2t {
+>   std::vector<irep_idt> b;
+>   static constexpr auto c = make_tuple(&a::b);
+> };
+> ```
+>
+> The predicate required `Converting` to be reached, no `PARSING ERROR`, and
+> the assertion text *with* its file and line, so the reduction cannot have
+> drifted onto a different abort. Which ingredient is load-bearing is still
+> open: `std::make_tuple()` with no arguments, with `int` member pointers,
+> with a `std::vector<int>` member pointer, and with a `std::vector<irep_idt>`
+> member pointer over the real `irep_idt` all verify, so `type2t` — or
+> something else reached through `irep2.h` — is required and `irep_idt` alone
+> is not sufficient.
+>
+> **A one-line input hits the same assertion**, and is worth keeping separate
+> because it is *not* a reduction of this header and shares no established
+> trigger with it beyond the line it lands on: `__complex__ int c = {1, 2};`
+> aborts, while `__complex__ int c = {1};` verifies. `_Complex` is a scalar
+> builtin taking a two-element brace-init, so it is neither
+> struct/array/vector nor union and has more than zero initialisers — the one
+> combination the arm does not cover.
 
 ### 13.3 Tractability — parsing is necessary, not sufficient
 
@@ -1102,6 +1192,26 @@ separate axis, and the STL operational model's cost scales steeply:
 | 1-key `unordered_map<string,POD>` + `make_shared` | `--unwind 4` | `SUCCESSFUL`, **4.6 s**, 2132 VCCs |
 | 4-key `unordered_map` insert+read loop | `--unwind 5` | `SUCCESSFUL`, **85.9 s** |
 | same | `--unwind 8` | **> 280 s — timeout** |
+
+> **Re-measured 2026-09-06 — the cliff is gone; see §15 M9 (self-verification
+> re-measure).** The same 4-key probe, ESBMC 8.5.0:
+>
+> | `--unwind` | 2026-07-27 (8.4.0, Linux x86_64) | 2026-09-06 (8.5.0, macOS arm64) |
+> |---|---|---|
+> | 5 | 85.9 s | **54.9 s**, `SUCCESSFUL` |
+> | 8 | > 280 s — timeout | **97.4 s**, `SUCCESSFUL` |
+> | 12 | — | **181 s** |
+> | 16 | — | **305 s** |
+>
+> Cost is now roughly linear in the bound rather than falling off a cliff
+> between 5 and 8. **Machine and architecture differ from the original row, so
+> this is not a clean A/B and must be re-run on Linux before the figures are
+> cited elsewhere** — but "times out at `--unwind 8`" is no longer true on any
+> host. The conclusion below is *unchanged in direction*: driving the real
+> `irep_idt` with `string_pool::get`'s body in scope still times out at 500 s
+> (§15 M9 (self-verification re-measure)), so whole-TU verification of
+> `src/goto-symex` remains out of reach. What moved is the size of the
+> harness Tier B′ can afford, not the verdict on whole-TU work.
 
 **Conclusion, stated plainly: even with G1–G8 closed, whole-translation-unit
 verification of `src/goto-symex` will not be tractable.** The `immer` HAMT alone
@@ -1154,16 +1264,18 @@ defect-masking failure mode of §9.1. Rules:
 |---|---|---|---|---|
 | ~~**WI-1**~~ | ~~`<shared_mutex>` operational model (G2)~~ | — | M0 | **Done** — closed in-tree; re-measured §15 M9 (G-remeasure) |
 | ~~**WI-2**~~ | ~~`<type_traits>` completion (G1) + `<compare>` `strong_ordering` (G6) + `std::unreachable` (G7)~~ | — | M0–M1 | **Done** — G1 and G7 by #6631, G6 in-tree |
-| ~~**WI-3**~~ | ~~`std::initializer_list` (G3), `iterator_traits::difference_type` (G4), `this_thread::yield` (G5), `aligned_storage[_t]`~~ | — | M1 | **Done** — `renaming.h` now stops only at G9 |
-| **WI-4** | **Tier B′ pilot**: a reduced harness that `#include`s `renaming.h` and drives the real `level1t`. **Gate:** must parse *and* verify in < 60 s. If it does not, record the negative result in §13.3 and keep Tier A — do not force it. **Now blocked on G9 alone**, not on a missing header. | ~1 wk | M4 | Removes transcription drift for C1 |
+| ~~**WI-3**~~ | ~~`std::initializer_list` (G3), `iterator_traits::difference_type` (G4), `this_thread::yield` (G5), `aligned_storage[_t]`~~ | — | M1 | **Done** — `renaming.h` parses clean as of 2026-09-06 |
+| **WI-4** | **Tier B′ pilot**: a reduced harness that `#include`s `renaming.h` and drives the real `level1t`. **Gate:** must parse *and* verify in < 60 s. If it does not, record the negative result in §13.3 and keep Tier A — do not force it. **Half met as of 2026-09-06:** it parses with zero errors; it does not convert, blocked on **G12**, not on G9 (closed) and not on a missing header. A weaker Tier B′ already runs today — `util/irep/irep.h` converts and drives the real `irep_idt` in 10 s. | ~1 wk | M4 | Removes transcription drift for C1 |
 | **WI-5** | E1 container reference/iterator invalidation modelling | ~2–3 wk | M6 | Stating R3/H-A9 on the real class; benefits all STL verification |
 | **WI-6** | E2 native 2-safety / equivalence mode | unscoped | post-M7 | Promotes H-C1/H-C2 from sweep to proof |
 
 **Critical path:** ~~WI-1 → WI-2 → WI-3~~ — retired; all three are done
-(§15 M9 (G-remeasure)). What stands between here and WI-4 is **G9**, not this
-chain. WI-4 is a gated experiment with an explicit
-accept-the-negative-result branch. WI-5/WI-6 are stretch goals; neither is a
-precondition for any property claimed in §8.
+(§15 M9 (G-remeasure)). ~~What stands between here and WI-4 is **G9**~~ —
+also retired: G9 closed on 2026-08-17 and parsing closed entirely on
+2026-09-06. What stands between here and WI-4 is **G12**, a frontend
+conversion abort rather than an operational-model gap. WI-4 is a gated
+experiment with an explicit accept-the-negative-result branch. WI-5/WI-6 are
+stretch goals; neither is a precondition for any property claimed in §8.
 
 Each WI ships with the repo-mandated two regression tests (one passing, one
 failing) under the appropriate `regression/esbmc-cpp*` suite, and is filed as a
@@ -1190,10 +1302,25 @@ Stated plainly, to avoid over-claiming:
    templates, and `swprintf`/`vswprintf` undeclared. Still the operational
    model, still not ESBMC's own headers, and one item shorter than it looks:
    the wide-`printf` pair needs models, not declarations.
+   **Re-measured 2026-09-06: parsing is closed — `renaming.h` emits zero
+   errors, and `execution_state.cpp` is down to seven library-model errors
+   (`<regex>`, `u16string`/`u32string`, `basic_string::rbegin`, the `istream`
+   manipulator overload, ambiguous `abs`), none of them in ESBMC's own
+   headers.** What blocks (a) now is *conversion*, not parsing: **G12**, an
+   `InitListExpr` shape inside `irep2_type.h` that trips
+   `assert(init_stmt.getNumInits() == 1)` in `clang_c_convert.cpp:2875`, and
+   **G13**, the unhandled `__atomic_test_and_set` / `__atomic_clear`
+   `AtomicExpr` kinds (§13.2).
    *(b) Tractability* — the measurements
    in §13.3 (a 4-key `unordered_map` loop takes 86 s at `--unwind 5` and times
    out at `--unwind 8`) put whole-TU verification out of reach **even after (a)
-   is fixed**. Tier A is therefore *transcription*, and its fidelity rests on the
+   is fixed**. **Re-measured 2026-09-06: those two figures are 54.9 s and
+   97.4 s, and the wall is now at `--unwind 16` (305 s) rather than 8 — but
+   (b) still stands**, because driving the real `irep_idt` with
+   `string_pool::get`'s body in scope times out at 500 s. ESBMC's C++ frontend
+   is also single-TU: passing two `.cpp` files processes only the last, so a
+   harness must `#include` the implementation it needs. Tier A is therefore
+   *transcription*, and its fidelity rests on the
    drift guard (§11.1), not on the compiler. **This remains the single largest
    soundness caveat of the whole plan and must be stated in every report** —
    closing §13.6 narrows it (Tier B′, §13.3) but does not eliminate it.
@@ -1223,7 +1350,11 @@ Stated plainly, to avoid over-claiming:
    and verifying the file. That is a corollary of item 1 and inherits its
    blocker: the file cannot be parsed, so the instrumentation cannot be
    verified. Confirmed on the R29 fix — the patched
-   `src/goto-symex/execution_state.cpp` stops at G9 alone. **What stands in for
+   `src/goto-symex/execution_state.cpp` stops at G9 alone. **Re-measured
+   2026-09-06: still blocked, but no longer for that reason.** G9 is closed and
+   `renaming.h` parses clean; what stops a goto-symex file now is the
+   conversion abort G12. The obligation is unchanged, its cause is not — a
+   report citing G9 for Mode C is quoting a closed item. **What stands in for
    it**, and what a report must say instead of claiming Mode C: an *empirical*
    reachability witness — an input that demonstrably drives the new branch and
    changes an observable. For R29's `dereference2t` arm that is three regression
@@ -2312,7 +2443,7 @@ the other 119 satisfy monotonicity vacuously. The script prints `exercised`
 alongside `violations` for exactly this reason — a monotonicity oracle over
 programs that never fail is a very fast way to prove nothing.
 
-**The scheduled job exists.** `.github/workflows/symex-oracles.yml` wires seven
+**The scheduled job exists.** `.github/workflows/aux-symex-oracles.yml` wires seven
 parity legs plus the unwind ladder, nightly for the cheap ones and weekly for the
 rest, `actionlint`-clean. Two implementation notes worth keeping: the default
 `scripts/build.sh` solver set has **no Z3**, so the solver-parity leg needs `-C`
@@ -2405,7 +2536,7 @@ Validated against a known answer rather than only on the corpus: the oracle flag
 flag its `_last` companion.
 
 **M7 closed.** D8 is delivered: `oracle_flag_parity.py`, `oracle_unwind_monotonic.py`
-and `oracle_claim_parity.py`, all wired in `.github/workflows/symex-oracles.yml`,
+and `oracle_claim_parity.py`, all wired in `.github/workflows/aux-symex-oracles.yml`,
 with every baseline entry citing a finding. Carried forward: the 433 tests over
 the claim cap, which is a real coverage gap rather than a tuning choice — a test
 with 38 claims costs 40 runs — and H-C7's unexercised advantage over the
@@ -6279,6 +6410,402 @@ answer, and it is the one the rest of the model already gives.
 | `regression/esbmc/ptr_rel_huge_object` | default | `KNOWNBUG` — pins R37, the residual this fix accepts. Weak by construction: `testing_tool.py` counts a timeout as satisfying a `KNOWNBUG`, and the expectation is only that `VERIFICATION SUCCESSFUL` is absent, so a future crash or timeout on the 8 EiB `malloc` would keep it green while R37 stopped being what is measured. It is exact today; it will not stay exact under drift |
 | `-L esbmc/`, `-L esbmc-unix` | as recorded | 1846/1846 and 624/624 (`01_pthread60` passes alone at 95.4 s; its parallel failure is the documented load artefact) |
 
+### M9 (R46) — 2026-08-29, the guard that only ever fired on the shape that needed it
+
+R45 left `offsetof(struct P, b)` as a loop bound hanging and called it a third
+mechanism. It is, and it is one line.
+
+**Where it was lost.** `offsetof` does not survive to symex as a member access
+at all. The frontend lowers it to `(char *)(struct P *)NULL + 4`, so what
+reaches `pointer_offset2t::do_simplify` is an `add2t`, not the
+`address_of(member(...))` its member arm was written for. The add arm rewrites
+that to `pointer_offset((struct P *)NULL) + 4 * 1` and recurses; the typecast
+arm strips the cast and recurses again; and the NULL arm then declined:
+
+```
+if (is_symbol2t(ptr_obj) && to_symbol2t(ptr_obj).thename == "NULL")
+  if (is_pointer_type(ptr_obj->type))
+  {
+    const pointer_type2t &ptr_type = to_pointer_type(ptr_obj->type);
+    // Allow NULL simplification for pointer types to primitives
+    if (!is_symbol_type(ptr_type.subtype))
+      return gen_zero(type);
+  }
+```
+
+`offsetof` is only ever written on a struct or union, so the pointee is always a
+symbol type and the guard always held. The one shape the fold existed to serve
+was the one shape it refused.
+
+**The guard has no recorded reason.** It arrived with the arm itself in #2803,
+whose commit body is empty; the comment states the restriction rather than a
+rationale. NULL is object 0 at offset 0 whatever it points to — the arm returns
+a literal zero and computes no size — so the pointee cannot bear on the answer.
+Removed rather than special-cased.
+
+**The census.** `offsetof` as a loop bound, no flags, 15 s cap; base is R45's
+build, since this sits on top of it.
+
+| # | bound | base | patched |
+|---|---|---|---|
+| o01 | `offsetof(struct P, b)` | **hangs** | `SUCCESSFUL` |
+| o02 | `offsetof(struct P, in.y)`, nested struct | **hangs** | `SUCCESSFUL` |
+| o03 | `offsetof(struct P, v[2])`, array member after padding | **hangs** | `SUCCESSFUL` |
+| o04 | `offsetof(union U, b)` | **hangs** | `SUCCESSFUL` |
+| o05 | `offsetof(struct P, a)`, offset 0 | **hangs** | `SUCCESSFUL` |
+| o06 | `assert(offsetof(struct P, b) == 4)` | `SUCCESSFUL` | `SUCCESSFUL` |
+| o07 | `assert(offsetof(struct P, b) == 8)` | `FAILED` | `FAILED` |
+| o08 | `container_of` round trip | `SUCCESSFUL` | `SUCCESSFUL` |
+
+o05 is the row worth reading twice: the bound is *zero*, so the loop body never
+executes, and it still hung — the guard has to fold for the exit to be decided
+at all, whatever the trip count turns out to be. o06 and o07 are the same pair
+R30 and R45 produced on their own bounds: the value was always available to the
+solver, and only the syntactic guard was not.
+
+**On removing a branch.** This deletes a live condition rather than a dead one,
+so *C-Dead* is not the obligation and cannot be discharged — the guard was
+reachable, and that it fired is the defect. What replaces that proof is the
+census above naming exactly which behaviour changes, plus the whole-suite sweep
+below showing nothing else does, and a Phase-2 contract pair that fails if the
+guard returns.
+
+| Artefact | Invocation | Verdict |
+|---|---|---|
+| `regression/esbmc/offsetof_loop_bound` | `--unwind 6` | `SUCCESSFUL`, pinned on `Generated 1 VCC(s), 0 remaining after simplification`; the base reports 2/2 and needs an unwinding assertion the folded run does not |
+| `regression/esbmc/offsetof_loop_bound_nested` | `--unwind 16` | same pin, on `offsetof(struct P, v[2])` — an array member behind a padding byte, so a fold that only handled a first-level scalar member would not satisfy it |
+| `regression/esbmc/offsetof_loop_bound_fail` | `--unwind 6` | `FAILED`, naming its own assertion text, so a fold returning some *other* constant would not satisfy it. It fails on the base too, so it is a guard rather than a mutation pin |
+| `regression/esbmc/pointer-offset2` | #2803's own test | passes — the arm this narrows was introduced with that test, and it does not depend on the restriction |
+| `regression/esbmc` | `ctest -j8`, 120 s cap | 1954 tests, 1 failure: `bundled_headers_from_vfs`, environmental and identical on the base build. Zero attributable |
+| `esbmc-unix`, `esbmc-unix2`, `esbmc-cpp11`, `esbmc-cpp14`, `esbmc-cpp17` | `ctest -j8`, 120 s cap | the NULL fold is not C-specific, so the pointer-heavy siblings were swept too: 862 tests, 5 failures, each re-run against the base build and failing there identically — `04_valgrind`, `error`, `error2`, and the `builtin-template` pair |
+
+
+### M9 (R45) — 2026-08-29, the distance the cast made unmeasurable
+
+R28's unbounded form asks which trip counts `do_simplify` cannot fold. R30, R42,
+R43 and R44 each answered it for one address spelling; this census asks the
+question of the *bound expression* instead, and finds the gap is not in the
+addresses at all.
+
+**The census.** Sixteen ways to write the same four-iteration bound, no flags,
+15 s cap. Fifteen fold. One does not:
+
+| # | bound | control | patched |
+|---|---|---|---|
+| g01 | `sizeof(a)/sizeof(a[0])` | `SUCCESSFUL` | `SUCCESSFUL` |
+| g02–g11 | enum, `static const`, struct member, union member, bit-field, pure call, `static` local, `const` array element, ternary, `(unsigned)4.0` | `SUCCESSFUL` | `SUCCESSFUL` |
+| g12 | `(char *)&p.b - (char *)&p.a` | **hangs** | `SUCCESSFUL` |
+| g13–g16 | shift, global, 2-D `sizeof` quotient, `strlen`-by-hand | `SUCCESSFUL` | `SUCCESSFUL` |
+
+Probing g12 splits it into two independent gaps in `fold_index_difference`,
+R30's own fold (#6783), which matched only a bare `address_of` of an `index2t`:
+
+| # | bound | control | patched |
+|---|---|---|---|
+| k01 | `&a[4] - &a[0]` | `SUCCESSFUL` | `SUCCESSFUL` |
+| k02 | `(char *)&a[4] - (char *)&a[0]` | **hangs** | `SUCCESSFUL` |
+| k03 | `&s[1] - &s[0]`, array of structs | `SUCCESSFUL` | `SUCCESSFUL` |
+| h06 | `(char *)&s[1] - (char *)&s[0]` | **hangs** | `SUCCESSFUL` |
+| h03 | `&p.b - &p.a` | **hangs** | `SUCCESSFUL` |
+| h05 | `&p.in.y - &p.in.x`, nested | **hangs** | `SUCCESSFUL` |
+| h08 | `&p.a - &p.a` | `SUCCESSFUL` | `SUCCESSFUL` |
+| h02 | `offsetof(struct P, b)` | **hangs** | **hangs** |
+
+**A typecast hides the base.** k01 folds and k02 does not, and they differ only
+by the `(char *)` that makes the difference a *byte* distance — the idiomatic
+spelling. `is_address_of2t` sees a `typecast2t` and declines.
+
+**A member is not an index.** h03 needs no cast at all: `&p.b` is
+`address_of(member(...))`, and the fold required `index2t`.
+
+**Both are one generalisation.** Decompose each operand into the object it is
+rooted at and its constant byte offset within it — walking constant subscripts
+*and* members, and looking through pointer casts — then, when the roots are
+structurally identical, fold to the byte distance divided by the operands' own
+pointee type. The unit has to come from the operands rather than from the
+sub-objects, which is exactly what k01 against k02 measures: 4 and 16 for the
+same two addresses.
+
+**The value was never in doubt.** `assert(n == 4)` on g12's bound proves
+`SUCCESSFUL` on the *control* — the solver knows the distance; only the
+syntactic guard fold did not, so `symex_goto`'s `is_false(new_guard)` never
+fired. This is R30's diagnostic shape reproduced on a different node, and the
+same conclusion follows: the exit decision should not rest on whether an
+optimisation folded the guard.
+
+**Side observation, not this patch's doing.** `struct P p, q;` with
+`(char *)&q.a - (char *)&p.a == 0` proves `SUCCESSFUL`, and its negation proves
+`FAILED`, on the control and the patched build alike — ESBMC's model answers a
+cross-object difference with 0 rather than reporting the C23 6.5.6p9 undefined
+behaviour. The fold declines that case (different roots), so it is strictly
+safer than the model it sits on, but the model's own answer deserves a row of
+its own.
+
+**The residual.** h02 still hangs, and it is a third mechanism rather than a
+missed operand shape: `offsetof(struct P, b)` lowers to
+`POINTER_OFFSET((void *)&0->b)`, and `pointer_offset2t` over a constant-offset
+address has no fold. `assert(offsetof(struct P, b) == 4)` proves, so the value
+is again available and only the guard is not. That is the next entry's shape.
+
+| Artefact | Invocation | Verdict |
+|---|---|---|
+| `regression/esbmc/member_address_difference` | `--unwind 4` | `SUCCESSFUL`, pinned on `Generated 1 VCC(s), 0 remaining after simplification`; the control reports 2/2 and needs an unwinding assertion the folded run does not |
+| `regression/esbmc/byte_address_difference` | `--unwind 20` | `SUCCESSFUL`, same pin, same control counts. This is the `(char *)` half — k01 already folded, so without this test the cast is unpinned |
+| `regression/esbmc/member_address_difference_fail` | `--unwind 6` | `FAILED`, naming its own assertion text rather than the verdict alone, so a fold returning some *other* constant would not satisfy it. It fails on the control too, so it is a guard rather than a mutation pin |
+| `regression/esbmc` | `ctest -j8`, 120 s cap | 1954 tests, 1 failure: `bundled_headers_from_vfs`, which fails identically on the control — this build links Homebrew LLVM, so `-resource-dir` is not the VFS path. Zero attributable |
+
+
+### M9 (R43) — 2026-08-26, one spelling of the idiom worked and the other hung
+
+R28's unbounded form is a loop whose trip count `do_simplify` cannot fold. R42
+found the multi-dimensional-array shape; this one is the pointer idiom every C
+program uses to walk an array.
+
+**The census.** Eight spellings of the same four-iteration loop, no flags, 15 s
+cap:
+
+| # | bound | before | after |
+|---|---|---|---|
+| c01 | `p != &a[4]` | hangs | `SUCCESSFUL` |
+| c02 | `p != a + 4` | `SUCCESSFUL` | `SUCCESSFUL` |
+| c03 | `p != &a[N]`, `N` a macro | hangs | `SUCCESSFUL` |
+| c04 | `int *e = &a[4]; p != e` | hangs | `SUCCESSFUL` |
+| c05 | `int n = 4; p != &a[n]` | hangs | `SUCCESSFUL` |
+| c06 | 2-D flat walk, `&a[0][0]`..`&a[1][2]` | hangs | hangs |
+| c07 | array of struct, `p != &a[4]` | hangs | `SUCCESSFUL` |
+| c08 | `p < &a[4]` | hangs | `SUCCESSFUL` |
+
+One row folded before: `a + 4`. Every `&a[...]` spelling hung, including the
+hoisted end pointer and the `<` comparison. That is the whole finding — the two
+spellings of one bound were incomparable, so the guard never went false.
+
+**Where it was lost.** `expr2t::simplify` returns nil for `address_of_id`
+before doing anything, under a comment from 2006:
+
+```
+    // Corner case! Don't even try to simplify address of's operands, might end up
+    // taking the address of some /completely/ arbitary pice of data, by
+    // simplifiying an index to its data, discarding the symbol.
+```
+
+The hazard is real and is about *operands*. The early return also skipped the
+node's own `address_of2t::do_simplify`, which rewrites `&base[c]` to
+`&base[0] + c` and never touches `source_value` — the symbol the comment is
+protecting.
+
+**Why the fold is not hoisted into `expr2t::simplify`.** Running `do_simplify`
+there for every `address_of` — the first shape of this fix — regresses
+`regression/incremental-smt/incremental-24` from `SUCCESSFUL` to `UNKNOWN`:
+`int *r1 = &x[1]` becomes `&x[0] + 1`, the value-set analysis no longer carries
+a concrete offset for `r1`, and k-induction runs to its bound without proving
+`*r1 == 2 || *r1 == 4`. The test is `THOROUGH`, so it does not run on macOS and
+the corpus sweep below did not see it; both Linux legs of CI did.
+
+The two spellings only ever need to meet where a comparison decides them, so the
+normalisation is applied to the operands of `equality2t` and `notequal2t` and
+nowhere else. Every other use of the address keeps its `&base[c]` form.
+
+**What it costs.** Unbounded, `int a[4]` with `p != &a[4]` reaches 443,649
+unwindings in 25 s and is still going; patched it returns `SUCCESSFUL`
+immediately. At `--unwind 6` the same program goes from 14 VCCs with 4
+surviving simplification to 9 with 1, and the unwinding assertion the truncated
+run needed disappears.
+
+**The residual.** c06 still hangs, and it is *not* R42's propagation gate:
+applying R42's patch on top of this one leaves it unchanged. A 2-D array walked
+as flat memory is a separate open shape.
+
+**Corpus.** All 14,119 regression tests, in suite-sized chunks. Every failure
+reproduces identically on a control binary built from the same tree without the
+patch — the macOS `PARSING ERROR` set, the `esbmc-solidity` 321 (empty `sol64`
+models on darwin), 40 Python string-split and humaneval cases, two `termination`
+`UNKNOWN`s and two `ir-ra` timeouts. Zero attributable to the fold.
+
+This sweep ran on macOS, where `THOROUGH` tests are skipped silently, so it did
+not cover `incremental-smt/incremental-24` — the one case the first shape of the
+fix broke. The `incremental-smt` suite is re-run for the narrowed fix with
+`THOROUGH` forced on: 0 verdict differences against master across all of it.
+
+| Artefact | Invocation | Verdict |
+|---|---|---|
+| `regression/esbmc/addressof_index_bound` | `--unwind 6` | `SUCCESSFUL`, pinned on `Generated 9 VCC(s), 1 remaining after simplification`. The verdict alone is vacuous here — the control also verifies, having discharged the extra VCCs through the solver instead. `assert(sum == 4)` keeps the four iterations load-bearing |
+| `regression/esbmc/addressof_index_bound_fail` | `--unwind 6` | `FAILED` on `array bounds violated`, the bound spelled `&a[5]`. Anti-vacuity for the fold itself: a rewrite that discarded the symbol — the 2006 comment's hazard — would lose this check. It fails on the control too, so it is a guard, not a mutation pin |
+### M9 (R47) — 2026-08-29, the direction that never folded, and four wrong answers
+
+R44's census asked how a bound is *spelled*. This one asks how the loop *moves*:
+eighteen guards over the same array — `!=`, `<`, `<=`, `>`, a `do`/`while`, a
+`goto`, a bare `break`, stride 2, an integer counter — no flags, 15 s cap.
+
+Fourteen fold. The four that do not are every **descending** walk, and their
+ascending twins all fold:
+
+| # | loop | base | patched |
+|---|---|---|---|
+| q01/q02 | `while` / `do while`, `p++` | `SUCCESSFUL` | `SUCCESSFUL` |
+| q03 | `for (p = &a[4]; p != &a[0]; p--)` | **hangs** | `SUCCESSFUL` |
+| q04 | same with `p > &a[0]` | **hangs** | `SUCCESSFUL` |
+| q05–q12, q14 | `<=`, reversed operands, stride 2, `goto`, `break`, `while (n--)` | `SUCCESSFUL` | `SUCCESSFUL` |
+| q13 | 2-D flat, `p != &a[0][0]`, `p--` | **hangs** | `SUCCESSFUL` |
+| r01 | descending to a *non-zero* bound `&a[1]` | **hangs** | `SUCCESSFUL` |
+| r03 | `p = p - 1` spelled out | **hangs** | `SUCCESSFUL` |
+| r04 | descending pointer, loop driven by an int counter | `SUCCESSFUL` | `SUCCESSFUL` |
+
+r04 is the control that matters: the decrement itself is fine. It is the
+comparison *against* a decremented pointer that never decides.
+
+**Four hypotheses were refuted before the fifth was measured**, and the entry
+records them because each cost a build and each was plausible:
+
+1. *"The bound is the bare base `&a[0]`."* Half true — it is what q03 and q13
+   hit — but r01 compares against `&a[1]`, shows `add != add`, and hangs anyway.
+2. *"`p--` yields a `sub2t` the cancellations miss, so propagation drops it."*
+   `constant_propagation` does lack a `sub2t` arm beside its `add2t` one, and
+   adding it flips the probe from `CP NO` to `CP YES` on 23007 assignments —
+   and changes no verdict. It was ablated back out.
+3. *"The offsets nest as `add(add(base, c1), c2)`."* They do not:
+   `simplify_pointer_add_const` fires 37767 times and the sums stay flat.
+4. *"`(B + c) ~ B` needs its own cancellation rule."* Written, measured, no
+   verdict change; ablated back out.
+
+**What it actually was.** The guard is `add(&a[4], k) != address_of(&a[0])` —
+the add's base still carries its *own* subscript 4, unnormalised, so it never
+matches the bare `&a[0]` beside it. R44's `flatten_addressof_under_add` is what
+rebases an address under pointer arithmetic, and on top of it the missing piece
+is one rule: `p - c` -> `p + (-c)` for a signed constant, so a descending walk
+arrives in the same `base + offset` shape an ascending one already had. An
+unsigned `c` is left alone; negating it is a wrap the fold has no reason to
+commit to.
+
+**Ablation, because three plausible changes is two too many.** All three were
+applied together first and q13 flipped. Removing the propagation arm: still
+flips. Removing the bare-base rule: still flips. Removing the `p - c` rewrite:
+stops flipping. The shipped change is that one rule; the other two are recorded
+above as measured-but-inert rather than carried along.
+
+**The 1-D half, closed the same day.** This entry first shipped only the 2-D
+walk and left q03, q04, r01 and r03 open, reasoning that a single subscript is
+`address_of2t::do_simplify`'s case rather than the flattening's. That is true of
+the *top-level* operand, which `normalize_addressof_index` already falls back to
+`do_simplify` for — but not of an address reached *under* pointer arithmetic:
+`flatten_addressof_under_add` tried only the ≥2-subscript flattening and
+returned nil for anything else, so the `&a[4]` inside `&a[4] + k` was never
+rebased and its bare `&a[0]` bound could never meet it. Giving that arm the same
+fallback the top level has closes all four. **18/18 of the census now folds.**
+
+The fallback is still confined to comparison operands, so R44's reason for
+keeping `do_simplify` out of `expr2t::simplify` — it costs the value-set
+analysis its concrete offset and k-induction stops converging — does not apply.
+Checked rather than argued: all 29 `incremental-smt` tests agree with the base
+build with `THOROUGH` forced on, `incremental-24` included.
+
+| Artefact | Invocation | Verdict |
+|---|---|---|
+| `regression/esbmc/descending_pointer_walk` | `--unwind 8` | `SUCCESSFUL`, pinned on `Generated 1 VCC(s), 1 remaining after simplification`; the base reports 2/2, the second VCC being the unwinding assertion the unfolded guard needs |
+| `regression/esbmc/descending_pointer_walk_fail` | `--unwind 8` | `FAILED`, naming its own assertion text, so a fold that miscounted the walk by one step would not satisfy it |
+| `regression/esbmc/descending_pointer_walk_1d` | `--unwind 8` | `SUCCESSFUL`, pinned on `Generated 9 VCC(s), 1 remaining after simplification`; the base reports 18/6 |
+| `regression/esbmc/descending_pointer_walk_1d_fail` | `--unwind 8` | `FAILED`, naming its own assertion text |
+| `incremental-smt`, `THOROUGH` forced | per-test A/B | 29/29 agree with the base, `incremental-24` included |
+| the R44, R45 and R46 censuses | per-file A/B | 0 differences; the only verdicts that move are this entry's own four |
+| `regression/esbmc` | `ctest -j8`, 120 s cap | 1959 tests, 1 failure: `bundled_headers_from_vfs`, environmental and identical on the base build |
+
+A `github_1175_13` failure in an earlier sweep was **not** a fallout: the log
+records `FileNotFoundError` on the esbmc path, because a rebuild relinked the
+binary while that ctest run was in flight. Do not rebuild during a background
+sweep; the run is void, not informative.
+
+
+### M9 (R44) — 2026-08-29, the row boundary the flattening never crossed
+
+R43 closed the `&a[c]` spelling of a loop bound and left one row of its census
+open: c06, a 2-D array walked as flat memory, still hung. It is a distinct
+mechanism, not a residue of R42's propagation gate.
+
+**Where it was lost.** `address_of2t::do_simplify` rewrites `&base[c]` to
+`&base[0] + c` for the *innermost* subscript only, and bails outright on a zero
+subscript. `&a[1][2]` therefore becomes `&(a[1])[0] + 2` and stops there, while
+the induction variable started at `&a[0][0]` carries base `&(a[0])[0]`. The two
+bases are different symbols, so `cancel_common_addend_operand` has nothing to
+cancel and the guard never goes false. Two addresses in the *same* row already
+worked, which is why the shape read as a 2-D problem rather than a row-boundary
+one.
+
+**The census.** Sixteen spellings, no flags, 15 s cap. `control` is master at
+`43bed6a659`; `eq-only` flattens the whole subscript chain in
+`normalize_addressof_index`; `+relations` also gives the ordered relations the
+normalisation equality and inequality already had.
+
+| # | bound | control | eq-only | +relations |
+|---|---|---|---|---|
+| e01 | `int a[2][3]`, `&a[0][0]`..`&a[1][2]` | hangs | `SUCCESSFUL` | `SUCCESSFUL` |
+| e02 | `&a[0][0]`..`&a[1][0]` | hangs | `SUCCESSFUL` | `SUCCESSFUL` |
+| e03 | `&a[1][0]`..`&a[1][2]`, one row | `SUCCESSFUL` | `SUCCESSFUL` | `SUCCESSFUL` |
+| e04 | `&a[0][0]`..`&a[0][3]`, one row | `SUCCESSFUL` | `SUCCESSFUL` | `SUCCESSFUL` |
+| e05 | 3-D `int a[2][2][3]` flat walk | hangs | `SUCCESSFUL` | `SUCCESSFUL` |
+| e06 | `p < &a[1][2]` | hangs | hangs | `SUCCESSFUL` |
+| e07 | `struct S { int v[3]; } s[2]`, `&s[0].v[0]`..`&s[1].v[2]` | hangs | hangs | `SUCCESSFUL` |
+| e08 | `&a[1][N]`, `N` a macro | hangs | `SUCCESSFUL` | `SUCCESSFUL` |
+| e09 | hoisted end pointer | hangs | `SUCCESSFUL` | `SUCCESSFUL` |
+| e10 | `int r = 1; &a[r][2]` | hangs | `SUCCESSFUL` | `SUCCESSFUL` |
+| e11 | 1-D `&a[0]`..`&a[4]` | `SUCCESSFUL` | `SUCCESSFUL` | `SUCCESSFUL` |
+| e12 | 1-D `a`..`a + 4` | `SUCCESSFUL` | `SUCCESSFUL` | `SUCCESSFUL` |
+| e13 | `&a[0][0]`..`&a[2][0]`, one past the end | hangs | `SUCCESSFUL` | `SUCCESSFUL` |
+| e14 | 1-D `&a[0]`, `p < &a[4]` | hangs | hangs | `SUCCESSFUL` |
+| e15 | 1-D `p = a`, `p < &a[4]` | hangs | hangs | `SUCCESSFUL` |
+| e16 | 1-D `p = a`, `p != &a[4]` | `SUCCESSFUL` | `SUCCESSFUL` | `SUCCESSFUL` |
+
+**R43's c08 row was wrong, and e14 is that row re-run.** It records
+`p < &a[4]` going from hangs to `SUCCESSFUL` under #7346. It does not: `<` never
+had the normalisation at all, because R43 wired it into `equality2t` and
+`notequal2t` only, and `simplify_relations` — which already carried the
+shared-base cancellation for every relation — was never given the operands in a
+form it could cancel. The row was not measured on the merged fix. Both 1-D and
+2-D ordered comparisons are closed here, by the same three lines.
+
+**Why the flattening has to reach under an add.** Flattening only a bare
+`address_of` operand *regresses* e03/e04 — the shapes that already worked: once
+the bound is rebased on `&a[0][0]`, an induction variable still carrying
+`&a[1][0] + k` no longer shares it. The eq-only column above is that variant;
+d04 was measured hanging under it before the recursion was added. Rebasing one
+side of a comparison is not optional once the other side moves.
+
+**Soundness.** The offset is exact under row-major layout and the rewrite is
+confined to comparison operands, so no dereference is ever built from the
+flattened form — `nested_index_bound_fail` walks past the end of the array and
+still reports `array bounds violated` on both binaries. Every level's row length
+must be a constant-sized array or the fold declines, which is what keeps
+`int **pp; &pp[1][2]` out of it.
+
+**e07, and why it was not a separate shape after all.** This entry first left
+e07 open, reasoning that a padding-dependent offset could not be the same
+rewrite. It is: count the offset in units of the *pointer's own pointee type*
+rather than in array lengths, walk member steps as well as subscripts, and the
+array case falls out as the special case where every step is a subscript. 16/16
+of the census now folds.
+
+**The trap that census caught.** Keeping the member path in the rebuilt base
+*and* adding its `member_offset` to the accumulated offset counts it twice.
+`struct S { int v[3]; }` hides it — `v` is at offset 0 — so e07 passed while
+the rewrite was wrong. `struct S { char c; int v[3]; }` is what exposes it, and
+only because the census asked for a padded struct on purpose. Members
+contribute nothing to the offset; the base already carries them.
+
+**The residual.** A walk whose two ends reach *different* members
+(`&s[0].in[0].x` to `&s[1].in[1].y`) still hangs: the zeroed bases are
+`&s[0].in[0].x` and `&s[0].in[0].y`, which do not match. Sharing a base there
+means dropping the member path from it entirely and making every step numeric,
+which changes the base's type — a different rewrite, not a wider one.
+
+| Artefact | Invocation | Verdict |
+|---|---|---|
+| `regression/esbmc/nested_index_bound` | `--unwind 8` | `SUCCESSFUL`, pinned on `Generated 11 VCC(s), 1 remaining after simplification`. The verdict alone is vacuous under a bound — the control verifies too, through the solver — so the VCC line is what bites: control reports 18/4 |
+| `regression/esbmc/nested_index_bound_lt` | `--unwind 8` | `SUCCESSFUL`, pinned on `Generated 17 VCC(s), 6 remaining after simplification`; control reports 26/11. This is the half R43's c08 row claimed and never had |
+| `regression/esbmc/nested_index_bound_fail` | `--unwind 8` | `FAILED` on `array bounds violated`, bound spelled `&a[2][1]`. Anti-vacuity for the fold: a rewrite that discarded the symbol would lose the check. It fails on the control too, so it is a guard, not a mutation pin |
+| `regression/esbmc/nested_member_index_bound` | `--unwind 8` | `SUCCESSFUL`, pinned on `Generated 35 VCC(s), 1 remaining after simplification`; the control reports 42/4. This is e07, the row this entry first left open |
+| `regression/esbmc/nested_member_index_bound_fail` | `--unwind 8` | `FAILED`, naming its own assertion text, so a fold that miscounted the stride by one element would not satisfy it |
+| `regression/esbmc` | `ctest -j8`, 120 s cap | 1957 tests, 1 failure: `bundled_headers_from_vfs`, which fails identically on the control (this build links Homebrew LLVM, so `-resource-dir` is not the VFS path) |
+| `incremental-smt`, `THOROUGH` forced | per-test A/B | 29/29 agree with the control, `incremental-24` included — the test R43's first, unnarrowed shape broke |
+| 45 `regression/esbmc` tests spelling `&x[...]` | per-test A/B | 0 verdict differences |
+
 ### M9 (R41) — 2026-08-26, the value the model reported was the value it denied
 
 M9 left `--ir-ieee` unable to prove `0*f == 0` and blamed the RNE enclosure's
@@ -6341,6 +6868,191 @@ than having to hold for every `f`, so the solver picks an in-range witness and
 | `-L floats`, `-L esbmc/` | `-j6` | 171/171 and 1914/1915; `bundled_headers_from_vfs` fails identically on an unpatched control |
 
 Registered as **R41**.
+### M9 (R42) — 2026-08-26, the gate that was right for a reason nobody wrote down
+
+R28's unbounded form is "a loop whose trip count `do_simplify` cannot fold", and
+R30 found one shape of it. A census asks how many there are: 20 trip-count
+spellings, each bounding a loop that runs exactly four times, run with no flags
+and a 15 s cap.
+
+**One hit, then a clean boundary.** Nineteen fold. `t[0][0]` on a
+two-dimensional array hangs, and narrowing it gives an exact split: every 1-D
+shape folds (index 0, index 2, through a pointer, assigned rather than
+initialised), and **every** multi-dimensional shape hangs — 2-D, 3-D, `const`,
+`static`, assigned, reached through a flat `int *` or a row `int (*)[2]`.
+Structs, arrays of structs and structs containing arrays all fold, so it is
+dimensionality and nothing else.
+
+**It is not the simplifier.** `index2t::do_simplify` handles nested
+`constant_array2t` correctly and would fold the pair. `--program-only` shows
+why it never gets the chance: on the 1-D program the equation is empty, while
+the 2-D program keeps `t == { { 4, 0 }, { 0, 0 } }` and
+`n == (unsigned int)(t[0][0])` as constraints. The array was never propagated.
+`goto_symex_statet::constant_propagation` says so in three lines whose comment
+restates them:
+
+```cpp
+    // Don't propagate multi dimensional arrays
+    if (is_array_type(arr.subtype))
+      return false;
+```
+
+Added in `e401c5ed8d` (2017-06-10) as "Fix #186" against the pre-migration
+tracker, so the rationale is gone.
+
+**Deleting it fixes all 15 shapes and is still the wrong patch.** The census
+goes green, the anti-vacuity twin still fails, and a bounds violation through a
+2-D element is still caught. Then an N x N array filled by a nested loop:
+
+| elements | with the gate | gate deleted |
+|---|---|---|
+| 64 | 0.16 s | 0.13 s |
+| 256 | 0.10 s | 0.11 s |
+| 576 | 0.11 s | 0.17 s |
+| 1024 | 0.12 s | 0.33 s |
+| 2304 | 0.17 s | 1.19 s |
+| 4096 | 0.31 s | 3.49 s |
+
+Every write rewrites the whole nested constant, so the cost is superlinear.
+The 2017 gate was protecting something real; the census is what recovered the
+reason.
+
+**So bound it rather than drop it.** Propagate a multi-dimensional array only
+below 256 elements — parity in the table, and four orders of magnitude above
+every shape that hangs. Above the bound the timings are the pre-patch ones
+exactly (0.22 s vs 0.22 s at 4096). The number is a measurement, not a
+principle, and it is stated as one where it is used.
+
+**The bound is not enough: the writes have to stay out.** CI on the bounded
+patch reported four `regression/numpy` tasks turning `SUCCESSFUL` into
+`FAILED`, and `overflow_11_matmul_new` and
+`function_contract/github_7056_assigns_global_2d` aborting inside Bitwuzla's
+`mk_store`/`mk_eq` on a width mismatch. Nine lines reproduce the first:
+
+```c
+int r[2][2];
+_Bool c = nondet_bool();
+__ESBMC_assume(c);
+if (c) { r[0][0] = 1; r[0][1] = 2; }
+assert(r[0][0] == 1);   /* FAILED with the array propagated */
+```
+
+Propagating `r` merges what symex would have kept as two SSA steps into one
+expression, `r#1 WITH [0 := r#1[0] WITH [0:=1] WITH [1:=2]]`.
+`decompose_store_chain` walks only the update-value spine of such a chain and
+takes `src` from the *outer* store's source, so the inner `WITH [0:=1]` — a
+sibling of the update it follows, not a dimension below it — never reaches the
+formula. The first write is silently dropped. Where the dropped operand is
+array-typed instead, the same walk hands `mk_store`/`mk_eq` a row on one side
+and an element on the other and the solver aborts.
+
+Without the gate this shape was unreachable, which is the rest of what the 2017
+gate was protecting. So the restriction is not only the element count: a
+multi-dimensional array propagates only while its value is a whole constant
+array, never a `with` chain over one. That is exactly what the census needs —
+it folds *reads* of `t[i][j]` — and it leaves every write on the pre-patch
+path. Folding multi-dimensional writes needs `decompose_store_chain` fixed
+first, and that is its own finding.
+
+**A second gap the propagation made visible.** With the array constant, the
+frame checker's element-wise form compares `m[k]` against its snapshot for a
+2-D global — an array-typed rvalue on one side and a folded row constant on the
+other. `frame_enforcer.cpp` already records that reading an array-typed rvalue
+fails on every solver (#7057) and refuses the shape on its whole-array path;
+the element-wise path did not, and on master the two sides degraded to the same
+wrong scalar select so the mismatch stayed silent. `emit_array_elem_frame` now
+descends to the scalar leaves, with the element-wise budget measured over the
+leaves rather than the outer extent. The check is strictly stronger: it
+compares all of row `k` where it previously compared one flattened element.
+
+**One test changed, and it is the interesting part of the review.**
+`github_1520_witness_no_aggregate` pins that no brace initialiser reaches a
+GraphML witness assumption (#1520, #1471), and guards against vacuity by also
+requiring `key="assumption">x == 0;`. Propagating its 2x3 `status` array folds
+`x` to a constant, the assignment step stops being symbolic, and that
+assumption disappears — the negative check would then pass on a witness with no
+assumptions at all. The fix is not to relax the expectation but to make it
+load-bearing: the element is now nondeterministic, which is the case #1520 is
+actually about, and both binaries then emit `status[1][2] == 0;` and
+`x == 0;` with no braces. On a deterministic element the assumption carried
+nothing a validator could not compute for itself; its sibling
+`github_1520_witness_scalar_kept` already used a nondet input for the same
+reason.
+
+**Mode C is not run and the reason is the finding.** The patch narrows a
+branch that the census demonstrates is reachable and wrong, so a C-Dead
+obligation would fail by construction and correctly so; the census is the
+cited reproducer that discharges it implicitly.
+
+| Artefact | Invocation | Verdict |
+|---|---|---|
+| `regression/esbmc/multidim_const_array_bound` | `--unwind 6` | `CORE`, `SUCCESSFUL` and `0 remaining after simplification` — identical to the 1-D program. On an unpatched control the same run leaves **2 VCCs, 2 remaining**, so the pin is the residual count rather than a timeout: the unbounded form hangs, and a `KNOWNBUG` on a hang is satisfied by any timeout. The generated count itself is not pinned: MSVC's `assert` lowering folds the user assertion away too, so Windows reports 0 generated where the other targets report 1 |
+| `regression/esbmc/multidim_const_array_bound_fail` | `--unwind 6` | `CORE`, `FAILED` — the folded bound is the real one |
+| `regression/esbmc/github_1520_witness_no_aggregate` | as recorded | `CORE`, unchanged verdict; identical witness on both binaries |
+| `regression/esbmc/multidim_const_array_write_kept` | default | `CORE`, `SUCCESSFUL`; **FAILED** on a control carrying the size-bounded-only patch, and `SUCCESSFUL` on master, so it pins the dropped write and nothing else |
+| `regression/esbmc/multidim_const_array_write_kept_fail` | default | `CORE`, `FAILED` — the surviving write carries the value it wrote |
+| `regression/function_contract/github_7056_assigns_global_2d_fail` | `--enforce-contract f --function f` | `CORE`, `FAILED` naming `c:@m[0][3]`. On master the same program verifies `SUCCESSFUL` with all five properties passed: the row comparison it emitted read one flattened element, so a write to another column of an unnamed row was invisible |
+| `-L esbmc/`, `-L numpy/`, `-L floats/`, `-L python-contracts/`, `function_contract` | `-j6` | 1946/1947, then 100% on each of the rest (108, 68 and 415/415). The one is `bundled_headers_from_vfs`, failing identically on a control |
+| corpus wall-clock | `-L esbmc/ -j6` | 75.3 / 80.0 s patched against 70.9 / 76.7 s control — the within-arm spread exceeds the between-arm gap, so no difference is resolvable here and the microbenchmark above is the measurement that counts |
+
+### M9 (R28 unbounded) — 2026-08-29, sizeof was the constant nobody propagated
+
+R28's diagnostic half shipped as #7338; this closes most of the unbounded half —
+"a loop whose trip count `do_simplify` cannot fold does not truncate, it fails
+to terminate."
+
+**The census.** Six ordinary bounded loops, default flags against
+`--no-simplify`, 15 s cap. Two hang, and one of them is the commonest
+array-length idiom in C:
+
+| # | bound | default | `--no-simplify`, before | after |
+|---|---|---|---|---|
+| s01 | `i < 10` | `SUCCESSFUL` | `SUCCESSFUL` | `SUCCESSFUL` |
+| s02 | `p != a + 4` | `SUCCESSFUL` | `SUCCESSFUL` | `SUCCESSFUL` |
+| s03 | `n = 4` | `SUCCESSFUL` | `SUCCESSFUL` | `SUCCESSFUL` |
+| s04 | `calloc(4, sizeof(int))` then `i < 4` | `SUCCESSFUL` | **hangs** | `SUCCESSFUL` |
+| s05 | `memset` then `i < 8` | `SUCCESSFUL` | `SUCCESSFUL` | `SUCCESSFUL` |
+| s06 | `n = sizeof(a) / sizeof(a[0])` | `SUCCESSFUL` | **hangs** | `SUCCESSFUL` |
+
+Widening it adds five more that all hung under the flag and now decide: s07 an
+array of structs, s08 a nested division, s09 a modulus, s11 a **VLA**, and s12
+the wrong-value control, which now reports `FAILED` instead of hanging.
+
+**The guard was not the gap, and that had to be established first.**
+`branch_decision_guard` already simplifies the guard for the branch decision
+under `--no-simplify` — that is #6781, and `symex_goto.cpp:23` says so. The
+value the guard is compared against is what never arrived.
+
+**Where it was lost.** `constant_propagation` decides whether an assignment's
+value is worth remembering, and its list of kinds is small: constants,
+`address_of`, `typecast`, `with`, the `constant_*` aggregates, and `add`. A
+`sizeof` survives to symex as its own `sizeof2t` node, and
+`sizeof(a) / sizeof(a[0])` is a `div2t` over two of them — neither is on the
+list, so `n` was never propagated and the guard `i < n` compared against a bare
+symbol. Under default flags `do_simplify` folds the whole expression to a
+literal before propagation ever sees it, which is exactly what hid this.
+
+Two arms close it. A `sizeof2t` propagates when its own `value` does — that
+field already holds clang's computed byte size, and for a VLA it holds a
+symbolic expression, so s11 works and a genuinely dynamic size still declines.
+And arithmetic propagates when its operands do, which `add` alone already
+assumed. **The stored value stays unfolded**, so `--no-simplify` still decides
+the encoding; `branch_decision_guard` is what folds it to decide the exit.
+
+**Ablation.** Each arm was removed in turn: with only the `sizeof` arm, s04 and
+s06 both hang; with only the arithmetic arms, both hang. Both are load-bearing.
+
+**What still hangs, and correctly.** s10 bounds the loop by
+`sizeof(a)/sizeof(a[0]) - k` for a nondeterministic `k`. It hangs on *default*
+flags too — the trip count is genuinely symbolic, and deciding it is
+`--smt-symex-guard`'s job, not propagation's.
+
+| Artefact | Invocation | Verdict |
+|---|---|---|
+| `regression/esbmc/no_simplify_sizeof_bound` | `--no-simplify` | `SUCCESSFUL`. The verdict alone is the pin here: on master the same run does not terminate, so the test fails outright rather than fails a regex |
+| `regression/esbmc/no_simplify_sizeof_bound_fail` | `--no-simplify` | `FAILED`, naming its own assertion text — master hangs on it too, so both halves bite |
+| `regression/esbmc` | `ctest -j8`, 120 s cap | 1954 tests, 1 failure: `bundled_headers_from_vfs`, environmental and identical on master |
+
 
 ### M9 (R28 diagnostic) — 2026-08-26, the proof that says nothing and looks the same
 
@@ -6870,6 +7582,1354 @@ family has no remaining spelling except R38's `--force-*-success` residual, whic
 is open by decision rather than by omission.
 ---
 
+
+### M9 (R48) — 2026-09-01, the write that had nowhere constant to land
+
+R43, R44 and R47 asked how a loop bound is *spelled*; R42, R45 and R46 asked how
+its trip count is *computed*. This census asks where the bound's value is
+*stored*: twenty programs, one loop each, `for (i = 0; i < B; i++)` over a bound
+of 4, with `B` reached through a `const` local, a file-scope `static const`, a
+global, an enum constant, a plain member, a bitfield member, a `char` member, a
+union member, an array element, a 2-D array element, a member of an array
+element, a member through a pointer, a dereference, a function return,
+`sizeof(a)/sizeof(a[0])`, a copy of a struct, a copy of a scalar, and a
+`memcpy`-shaped element copy. No flags, 15 s cap.
+
+**Nineteen decide. The one that does not is a member of a member.**
+`struct S { struct I in; }; struct S x; x.in.n = 4;` then looping to `x.in.n`
+never terminates, while the same program with one less level of nesting
+(`x.n = 4`, `i < x.n`) proves `SUCCESSFUL` in 0.4 s.
+
+**Four controls separate nesting from initialisation**, because the flat row
+that works is also the row that was written with an initialiser:
+
+| Control | Shape | Base |
+|---|---|---|
+| c1 | flat member, assigned into an uninitialised struct | `SUCCESSFUL` |
+| c2 | nested member, written by an initialiser `{{4}}` | `SUCCESSFUL` |
+| c3 | nested, the whole inner struct assigned | `SUCCESSFUL` |
+| c4 | nested, zero-initialised first, then the member assigned | `SUCCESSFUL` |
+| c6 | nested, uninitialised, read by a bare `assert(x.in.n == 4)` | `SUCCESSFUL` |
+| c5 | nested, uninitialised, read as a **loop bound** | **hangs** |
+
+So it is neither the nesting nor the assignment on its own: it is a nested
+member write into a struct that has **no propagated value yet**, read back
+somewhere that needs the value at symex time rather than at solve time. c6 is
+the row that says the equation is right — the solver proves the member is 4.
+Only the exit decision, which `symex_goto` takes syntactically on the folded
+guard (R30), cannot see it.
+
+**Where the value is dropped.** The VCC dump names the shape exactly:
+
+```
+{-2} x#2 == (x#1 WITH [in := x#1.in WITH [n := 4]])
+{-3} m#1  == x#2.in.n
+```
+
+`m` is a symbol rather than `4`, so `i < m` never folds and the loop unwinds
+forever. `constant_propagation`'s struct arm walks the `with` chain checking
+every update is itself propagatable, and then requires the chain's base to not
+be a `member2t` (`goto_symex_state.cpp:322`). A nested member write spells its
+base as exactly that — `x#1.in`, the old value of the field being updated —
+so the inner `with` is refused, which makes the outer update non-constant,
+which drops the whole struct. Nothing about the expression is unsafe to keep:
+`x#1` is already renamed, so the value is self-contained in the same way
+`with(x#1, n, 4)` — which the flat case propagates, and which c1 relies on —
+already is.
+
+The condition is not an old guard that predates the chain walk. #2845 *relaxed*
+`is_symbol2t(current)` to `!is_member2t(current)` when it introduced the walk;
+the member exclusion is the one shape the relaxation kept out, and it is the
+shape a nested write always produces. The array arm added by the same commit
+carries no such restriction, which is why `a[1] = 4` under an uninitialised
+array folds and `x.in.n = 4` does not.
+
+**The fix is the removal of that clause**, and the extended census is the
+control for it — eight nested-member shapes, every one of which hangs on the
+base build and decides on the patched one:
+
+| # | shape | base | patched |
+|---|---|---|---|
+| d01 | three levels, `x.b.a.n` | **hangs** | `SUCCESSFUL` |
+| d02 | member of an array element, `a[1].in.n` | **hangs** | `SUCCESSFUL` |
+| d03 | nested member through a pointer, `p->in.n` | **hangs** | `SUCCESSFUL` |
+| d04 | nested bound plus two sibling members asserted | **hangs** | `SUCCESSFUL` |
+| d05 | the member written twice, 4 then 6 | **hangs** | `SUCCESSFUL` |
+| d06 | an array inside the inner struct, `x.in.a[1]` | **hangs** | `SUCCESSFUL` |
+| d07 | anti-vacuity twin: the same loop asserted as 5 | **hangs** | `FAILED` |
+| d08 | an unrelated nondet symbol in scope | **hangs** | `SUCCESSFUL` |
+
+d04 and d05 are the rows that matter beyond termination, and both ship. d04
+asserts the two members the loop does not read, so a fold that over-wrote the
+struct rather than one field would fail it; d05 asserts the *second* write, so a
+fold that took the first `with` in the chain would fail it — that is the
+ordering property the composition pair does not reach, since it writes three
+*different* members. d07 is the twin that shows the folded trip count is the
+right one and not merely a number.
+
+**Measured.**
+
+| Artefact | Invocation | Verdict | Mutation it kills |
+|---|---|---|---|
+| `regression/esbmc/nested_member_loop_bound` | default | `CORE`, `SUCCESSFUL`, pinned on `Generated 2 VCC(s), 0 remaining after simplification` — the bound folds, so both claims discharge without the solver | the clause restored: the base build does not terminate on this file |
+| `regression/esbmc/nested_member_loop_bound_fail` | default | `CORE`, `FAILED`, naming its own assertion text | a fold that invented a trip count rather than reading one |
+| `regression/esbmc/nested_member_loop_bound_overwrite` | default | `CORE`, `SUCCESSFUL` on `s == 6` — the member is written 4 then 6, so the fold takes the chain's *last* update | a fold that read the first `with` in the chain |
+| `regression/esbmc/nested_member_loop_bound_overwrite_fail` | default | `CORE`, `FAILED` on `s == 4`, the same program asserted against the first write | the pair passing vacuously in both directions |
+| the 20-shape storage census + 6 controls | per-file, 15 s cap | 19/20 on the base build, 20/20 patched | — |
+| the 8-shape nested census | per-file, 20 s cap | 0/8 on the base build, 8/8 patched | — |
+| `-L esbmc/` | `ctest -j6`, 120 s cap | **2019/2019, 0 failures**, 413 s | — |
+| unit tests | `ctest -LE regression -j6` | 771/771 | — |
+| `-L esbmc-cpp/cpp` | `ctest -j6`, 120 s cap | 955/957; both residues controlled below | — |
+
+**The two C++ residues are the harness cap, not the patch.** `ch13_10` passes
+when re-run outside an 8-way load, so it is the familiar slow-test flake.
+`ch9_7` is the interesting one: it takes **118.4 s** on the patched build and
+**118.5 s** on a control binary of the same tree without the patch, against
+`testing_tool.py`'s own 120 s ceiling — which `ctest --timeout` cannot raise, so
+the test sits half a second from failing on this machine whatever is committed.
+Its own `test.desc` asks for `--timeout 900`, which is the clearest statement
+that 120 s was never its budget.
+
+**A union in the nested path is the other residual, and the census does not
+reach it.** All twenty storage shapes carry a struct or an array between the
+symbol and the bound, never a union, so 20/20 is a claim about that census and
+not about nesting in general: `union U { struct P a; int b; }` read as
+`x.u.a.p` still hangs under default flags, and decides under `--unwind 8`. The
+union arm gates its updates on `is_constant_expr` where the struct arm gates on
+`constant_propagation`, so a struct-typed update into a union declines and takes
+the enclosing struct down with it — the same asymmetry this entry just closed
+between the struct and array arms, one level further in. Left open here rather
+than fixed blind.
+
+The probe the fix does *not* move is worth naming. The same nesting with a
+**nondet** member — `x.in.n = nondet_int()` under `assume(0 <= x.in.n <= 4)` —
+hangs on both builds, because there is no constant to propagate in the first
+place. That is R28's stated residual: a genuinely symbolic bound is
+`--smt-symex-guard`'s question, not constant propagation's, and this entry does
+not narrow it.
+
+---
+
+
+### M9 (R49, R50) — 2026-09-01, the same shape in the two sibling arms, and only one of them is a defect
+
+R48 closed the struct arm of `constant_propagation`. The obvious follow-up is
+whether the array and union arms beside it refuse the same shape, and both do —
+but for opposite reasons, and only one of them should be changed. Recording both
+together is the point of the entry: the two look identical from the outside, and
+the cheap read of "R48 again, twice" is wrong.
+
+| Probe | Shape | Base |
+|---|---|---|
+| u02 | `union U{int a; short b;}; u.b=1; u.a=4;` looped to `u.a` | **hangs** |
+| a02 | `int a[2][2]; a[1][1]=4;` looped to `a[1][1]` | **hangs** |
+
+**R49 — the union arm's same-field rule is redundant, and it is the defect.**
+The arm refuses any chain touching two different fields, reasoning in-code that
+"union members alias each other in memory: writing to one field affects what you
+read from another field." That is true, and it is already enforced one layer
+down: `member2t::do_simplify` returns nil rather than stepping past a `with`
+whose source is a union, for exactly that reason. So the chain
+`with(with(u#1, b, 1), a, 4)` is safe to carry — a read of `a` folds to 4
+because the outermost update names `a` and is therefore the last write, and a
+read of anything else stops at the `with` and stays symbolic. The propagation
+gate was denying itself a value the simplifier would have handled correctly.
+
+Five probes hold the direction, measured before and after:
+
+| Probe | Program | Base | Patched |
+|---|---|---|---|
+| s1 | `u.a=4; u.b=1;` then `assert(u.a==4)` | `FAILED` | `FAILED` |
+| s2 | same, `b` a `short` — a partial-width clobber | `FAILED` | `FAILED` |
+| s3 | `u.a=0; u.c[0]=1;` through a `char[4]` member | `FAILED` | `FAILED` |
+| s4 | `u.b=1; u.a=4;` then `assert(u.a==4)` | `SUCCESSFUL` | `SUCCESSFUL` |
+| s5 | same width both ways, `assert(u.b==4)` | `SUCCESSFUL` | `SUCCESSFUL` |
+| s6 | the R49 bound | **hangs** | `SUCCESSFUL` |
+| s7 | the same bound asserted as 5 | **hangs** | `FAILED` |
+
+s1–s3 are the rows that matter: every read aliased by a *later* sibling write
+still refuses to fold, in all three widths, so the relaxation buys termination
+without buying a wrong answer. s3 is the one that would catch a fold reasoning
+about field names rather than bytes.
+
+**R50 — the array arm's refusal is load-bearing, and removing it crashes the
+solver.** `array_may_propagate` declines a multi-dimensional array unless the
+whole value is a constant, citing an encoding gap. That citation was checked
+rather than trusted: with the clause ablated and the binary rebuilt, a02 decides
+— and three probes that read the updated row at a **nondet** index abort with
+
+```
+bitwuzla: error: invalid call to ... expected array term at index 0
+```
+
+The mechanism is visible in the VCC: the guard is
+`(a#1[1] WITH [0:=5] WITH [1:=4])[i]`, a `with` chain whose base is `a#1[1]` —
+a *partial* index into a 2-D array. ESBMC flattens `int[2][2]` to a flat
+`int[4]` in the SMT encoding, so `convert_array_index` lowers `a#1[1]` to a
+`select` and hands back an **element** where the enclosing `with` needs a
+**row**. The flattening assumes every index chain runs all the way down to an
+element; a row-valued expression has no encoding. R42's `is_constant_array_value`
+gate is what keeps symex from ever building one, and it is correct.
+
+**R50 is latent, not live.** Five routes to a row-valued expression on the
+shipped build — a pointer to a row (`int (*r)[2] = &a[1]`), a decayed row
+pointer (`int *r = a[1]`), a row passed to a function, the direct
+`a[1][0]=5; a[1][1]=4`, and the same inside a struct — all return the correct
+verdict, because none of them produces a `with` over a partial index. The gate
+is the only producer, so the gap is reachable only by removing it. It is
+therefore recorded as an open **encoder** defect, not a propagation one, and the
+fix belongs in `decompose_store_chain` / `convert_array_index`: either give a
+partial index an encoding, or normalise `with(index(A, i), j, v)` into a flat
+store on `A` before it reaches the solver. Not attempted here.
+
+**Measured.**
+
+| Artefact | Invocation | Verdict | Mutation it kills |
+|---|---|---|---|
+| `regression/esbmc/union_mixed_field_bound` | default | `CORE`, `SUCCESSFUL`, pinned on `Generated 1 VCC(s), 0 remaining after simplification` | the same-field requirement restored: the base build does not terminate on this file |
+| `regression/esbmc/union_mixed_field_bound_fail` | default | `CORE`, `FAILED`, naming its own assertion text | a fold that invented a trip count |
+| `regression/esbmc/union_mixed_field_aliased_fail` | default | `CORE`, `FAILED` — `u.a=4; u.b=1;` then `assert(u.a==4)` | **the unsound direction**: a relaxation that let an aliased read fold would turn this `SUCCESSFUL` |
+| the 7 union probes | per-file, 20 s cap | 5/7 base (2 hang), 7/7 patched, **s1–s5 unchanged** | — |
+| the R50 ablation | rebuilt binary, nondet-index reads | 3 solver aborts | — |
+| `-L esbmc/` | `ctest -j6`, 120 s cap | **2024/2024, 0 failures**, 414 s | — |
+| unit tests | `ctest -LE regression -j6` | 771/771 | — |
+
+The third artefact is the one to keep. The passing pair only shows the bound
+now folds; `union_mixed_field_aliased_fail` is what shows the fold stops where
+the aliasing starts, and it is the test that would break first if someone later
+relaxed `member2t::do_simplify`'s union arm to match this one.
+
+**The trap this entry nearly fell into.** The first pass read `x.a[1][0]=5;
+x.a[1][1]=4;` proving `SUCCESSFUL` as evidence the ablation was safe. It is not
+evidence of anything: both probes report `0 remaining after simplification`, so
+the claim was folded at symex time and the encoder never saw the chain. Only a
+read at a nondet index keeps the store chain alive to the solver, and that is
+what turned a clean-looking ablation into three aborts.
+
+---
+
+### M9 (R50) — 2026-09-01, the guard was right, and the thing it was guarding was worse than advertised
+
+R50 closed as *latent*: the propagation gate was the only producer of a
+row-valued `with`, so the encoding gap behind it could not be reached on a
+shipped build. This entry fixes the encoder and then removes the gate. The
+sequence matters — the row's own recommendation was "do **not** relax the
+propagation gate ... fix `decompose_store_chain` / `convert_array_index`
+first" — and following it turned up a second failure the ablation had hidden.
+
+**The ablation understated the defect.** R50 recorded three solver aborts, and
+concluded the gap was an abort. Re-run with the gate relaxed and the encoder
+untouched, two of the shapes do something worse than abort:
+
+| Probe | gate relaxed, encoder unfixed |
+|---|---|
+| `a[1][0]=5; a[1][1]=4;` read at nondet `i` | **abort** — `expected array term at index 0` |
+| the same read through a row pointer `p[1][i]` | **`VERIFICATION FAILED` on a correct program** |
+| the same under a branch merge (`ite` over rows) | **`VERIFICATION FAILED` on a correct program** |
+
+The wrong answer is the more serious of the two, and it has a different cause
+than the abort. It was not a surprise to the gate's author — the comment being
+deleted here names it, "the earlier sibling store is dropped from the formula
+(silent wrong answers)". It was a surprise to R50, whose ablation only ever
+produced aborts, and which therefore recorded the gap as an abort. The lesson is
+narrow and worth keeping: an ablation measures the shapes it happens to reach,
+and here the code's own comment was the better inventory.
+
+The mechanism is separate from the abort's. `decompose_store_chain` walks
+`update_value` — the *newest* update's spine — and never visits `source_value`.
+A row carrying two stores is exactly what `a[1][0]=5; a[1][1]=4;` composes, so
+the older store is dropped from the formula and the solver is free to invent a
+counterexample. An abort is loud; this is not.
+
+**Two encoder changes, each answering one of the row's two suggestions.**
+
+- `lower_flattened_row_select` gives a read out of a row an encoding instead of a
+  term: `(R WITH [j:=v])[i]` becomes `i == j ? v : R[i]`, and a read out of an
+  `ite` distributes over its arms. Repeated, this drives the read down to an
+  index chain `decompose_select_chain` already flattens. The two subscripts are
+  compared one bit wider than either operand, so a signed and an unsigned
+  spelling of the same subscript still meet and no two distinct values collide.
+- `decompose_stores` normalises a chain into flat element stores, walking the
+  chain *and* each row it updates. A row whose own chain is rooted at exactly the
+  row being replaced is updated in place — which keeps the ordinary `a[i][j] = v`
+  a single store — and any other row is written out element by element, which is
+  correct whatever the row denotes because every element is named from the row
+  expression itself.
+
+**The gate still needs its dimension bound, and finding that out cost two
+false starts.** With the encoder fixed it looked as though the bound could go
+entirely: three 3-D probes decided correctly without it. They were weak probes.
+Each wrote two elements and read the *innermost* subscript at a nondet index —
+the one 3-D shape the encoder already handled. Write all eight elements and read
+the **outer** subscript and the same build aborts:
+
+```
+int a[2][2][2]; /* all 8 written */  assert(a[i][0][0] > 0);
+   merge base: VERIFICATION SUCCESSFUL      gate unbounded: SIGABRT
+```
+
+Bitwuzla `expected array term at index 0`, Z3 `argument must be a tuple`, on
+default flags with no pointer involved. The mechanism is one level deeper than
+R50's: `expand_row_stores` names a nested row's leaves as `index(index(row,k),k2)`,
+`lower_flattened_row_select` declines because the *outer* read is already scalar,
+and `decompose_select_chain` then strips **both** index nodes and hands back the
+row-valued `with` itself. Two dimensions escape only because their leaves are a
+single index node, so the lowering fires before the select-chain flattener can
+reach past the `with`.
+
+So the bound stays at two dimensions, now for a reason that has been measured
+rather than assumed, and the 3-D bound remains unfolded — R50's residual, not its
+fix. The lesson is the same one this entry already records about ablations: a
+probe that decides correctly proves only that *that shape* works, and the shapes
+that work are exactly the ones least likely to expose the gap.
+
+**Measured.** Every new test is either a mutation-killer or the anti-vacuity twin
+of one. The two halves of the patch are killed by different tests, which is why
+the matrix has three columns and not two:
+
+| Test | master | gate only, encoder unfixed | full fix | what it kills |
+|---|---|---|---|---|
+| `nested_array_loop_bound{,_fail}` | **hangs** | `SUCCESSFUL`/`FAILED` | `SUCCESSFUL`/`FAILED` | the gate half |
+| `nested_array_row_alias` | `SUCCESSFUL` | **abort** | `SUCCESSFUL` | the row-read encoding |
+| `nested_array_row_alias_fail` | `FAILED` | **abort** | `FAILED` | same, anti-vacuity |
+| `nested_array_row_via_pointer` | `SUCCESSFUL` | **`FAILED`** | `SUCCESSFUL` | the dropped-store wrong answer |
+| `nested_array_row_phi_merge` | `SUCCESSFUL` | **`FAILED`** | `SUCCESSFUL` | the same, under a phi merge |
+| `nested_array_row_memcpy` | **`FAILED`** | **`FAILED`** | `SUCCESSFUL` | a row grafted whole by `memcpy` — a false alarm on master |
+| `nested_array_plane_memcpy` | **`FAILED`** | **`FAILED`** | `SUCCESSFUL` | the same at 3-D, through the nested recursion |
+| `nested_array_vla_row{,_fail}` | `SUCCESSFUL`/`FAILED` | same | same | the symbolic-extent fallback stays reachable |
+| `nested_array_row_{via_pointer,phi_merge}_fail` | `FAILED` | `FAILED` | `FAILED` | anti-vacuity twins |
+
+| Artefact | Invocation | Result |
+|---|---|---|
+| the 10 new tests | default, and again `--z3` | identical verdicts under both solvers |
+| `-L esbmc/` | `ctest -j6`, 120 s cap | **2038/2038, 0 failures** (master baseline 403 s, same tree minus the patch) |
+| unit tests | `ctest -LE regression -j6` | 771/771 |
+| `-L esbmc-solidity` | `ctest -j6` | 2 failures, **both pre-existing** — see below |
+| execution census | address-level breakpoints on every added line, shipped binary | every added line executes under the 12 tests except `is_flattened_row`'s second `||` operand, which `nested_array_3d_row_memcpy` was written to reach |
+| `git clang-format --diff HEAD` | changed lines only | clean |
+
+**The two Solidity failures are not this patch.** `nested_array_deep_1` and
+`delegate_shadow_3` are `KNOWNBUG` tests that now return `SUCCESSFUL`, so ctest
+reports them as failures. The obvious reading — a nested-array patch broke a
+nested-array test — is wrong: rebuilt with this patch stashed, both XPASS on the
+baseline too. They are master drift and want a separate flip to `CORE`.
+
+**The cost of being right, measured.** `expand_row_stores` names every element
+of a row it writes whole, so a `memcpy` between two rows of `int a[2][N]` emits N
+flat stores where the old path emitted one. Read back at a nondet index:
+
+| N | merge base | this branch |
+|---|---|---|
+| 128 | 0.28 s, **`FAILED`** | 0.26 s, `SUCCESSFUL` |
+| 256 | 0.26 s, **`FAILED`** | 7.4 s, `SUCCESSFUL` |
+| 512 | 0.25 s, **`FAILED`** | 54 s, `SUCCESSFUL` |
+
+The base column is a **false alarm** on a correct program — the row copy is
+dropped from the formula — so the branch is not trading correctness for time; it
+is paying time to stop being wrong. But the growth is quadratic and, unlike the
+propagation path, nothing bounds it: `array_may_propagate`'s 256-element cap
+gates constant propagation only, and a chain built by the `memcpy` layer never
+passes through it. Recorded as an open residual. Bailing out above a threshold is
+not the fix — the fallback is `decompose_store_chain`, which is the wrong-answer
+path this entry exists to remove. The fix is to stop naming a row's elements as
+selects out of the row.
+
+**The trap this entry nearly fell into.** Two of the fourteen tests report
+`0 remaining after simplification`: their claims fold at symex time and the
+encoder never sees them. Those two pin the *propagation* half and nothing else —
+had the set stopped there, the encoder could have been reverted wholesale with
+every test still green. The row tests carry 5–7 live VCCs precisely because they
+read at a **nondet** index, and that is the only reason the wrong-answer column
+above is observable at all. This is R49's lesson recurring one entry later: check
+the VCC count before believing a test gates the solver.
+
+
+### M9 (R51) — 2026-09-01, the residual that was one arm short
+
+R50 stopped at two dimensions and said why: with the propagation gate lifted,
+`int a[2][2][2]` with all eight elements written and a nondet *outer* subscript
+aborts on both solvers. This entry closes that residual. It is the shorter half
+of R50 — one function grows two arms — and the interesting part is how nearly it
+was closed with the wrong change.
+
+**The defect is a hang, not the abort.** The abort needs the gate removed, so it
+was never reachable on a shipped build. The hang is:
+
+```
+int a[2][2][2]; a[1][1][1] = 4;
+for (i = 0; i < a[1][1][1]; i++) s++;      /* never terminates */
+```
+
+The 2-D spelling of the same program proves in 0.4 s on R50's branch. This is
+R48/R49/R50's shape once more — the equation is right and only `symex_goto`'s
+exit decision cannot see the value — and it costs a verdict on default flags.
+
+**Two producers of a row-valued `convert_ast`, not one.** R50 named the
+mechanism as `expand_row_stores` writing a nested row's leaves as
+`index(index(row,k),k2)`, which `decompose_select_chain` flattens straight past
+the enclosing `with`. That is a producer, and resolving those leaves through the
+row's own structure does fix the outer-subscript probe. It does not fix
+
+```
+assert(a[1][i][1] > 0);                    /* the *middle* subscript */
+```
+
+which still aborts, `expected array term at index 0`, with the leaves resolved.
+Instrumenting the decline shows why: `simplify` folds the constant outer
+subscript into the chain, so the read is already `PLANE[i][1]` with `PLANE` a
+plane-valued `with`. No store is involved. `lower_flattened_row_select` declined
+because its source was an `index` rather than a `with`, `decompose_select_chain`
+then rooted the chain at `PLANE`, and `convert_ast` was handed a row.
+
+So the row's *reads* were the general case all along, and the store-side change
+was the special one. Pushing the subscript through a row at **every** level —
+not only the outermost — makes the leaf resolution unnecessary: the leaves are
+reads, and reads now lower. `lower_flattened_row_select` becomes `push_row_read`
+with three arms (a `with`, an `ite`, and a row read out of a deeper row), R50's
+`expand_row_stores` is untouched, and the patch is 58 lines added against 50
+removed, most of the removal being a helper the gate no longer needs.
+
+**The third arm is guarded, and the guard is what keeps 2-D off it.**
+Pushing unconditionally is correct but reroutes every 2-D read that R50 already
+handled through new terms. The precise condition is whether the select chain's
+*root* is itself a row: for `V[i][1]` over a whole array the root is `V`, which
+has a term and needs no pushing; for `PLANE[i][1]` the root is `PLANE`, which
+does not. With `select_chain_root()` deciding it, `loop2d` takes the `with` arm
+alone and the nested arm never fires — measured, not assumed. The claim is
+about that arm only: widening `is_flattened_row` to recognise an `ite` widens
+the *entry* gate too, so a 2-D `index(ite_row, i)` arriving from elsewhere now
+distributes where it used to reach `fix_array_idx`. That is a strict
+improvement — such an `ite` has no term, so the old path could only abort on
+it — but it is reasoned, not measured, and the suite showing no movement is
+the evidence for it.
+
+**Measured.** Three configurations, because two cannot separate the halves —
+every read probe already decides on the merge base, since the gate stops it
+reaching the encoder at all:
+
+| Test | base (PR #7474) | gate lifted, encoder unfixed | full fix |
+|---|---|---|---|
+| `nested_array_3d_loop_bound{,_fail}` | **hangs** | `SUCCESSFUL`/`FAILED` | `SUCCESSFUL`/`FAILED` |
+| `nested_array_3d_outer_read{,_fail}` | `SUCCESSFUL`/`FAILED` | **abort** | `SUCCESSFUL`/`FAILED` |
+| `nested_array_3d_middle_read{,_fail}` | `SUCCESSFUL`/`FAILED` | **abort** | `SUCCESSFUL`/`FAILED` |
+| `nested_array_3d_row_pointer{,_fail}` | `SUCCESSFUL`/`FAILED` | **abort** | `SUCCESSFUL`/`FAILED` |
+| `nested_array_3d_phi_merge{,_fail}` | `SUCCESSFUL`/`FAILED` | **abort** | `SUCCESSFUL`/`FAILED` |
+| `nested_array_3d_row_memcpy{,_fail}` | `SUCCESSFUL`/`FAILED` | **abort** | `SUCCESSFUL`/`FAILED` |
+| `nested_array_4d_outer_read{,_fail}` | `SUCCESSFUL`/`FAILED` | **abort** | `SUCCESSFUL`/`FAILED` |
+
+The bound pair kills the gate half, the twelve read tests kill the encoder
+half, and each read test carries live VCCs -- 3, or 5 for the memcpy pair --
+so none of them folds at symex time.
+
+Every `_fail` half pins the property id, line and message of the assertion it
+means, not just the verdict. Each of these programs raises array-bounds claims
+on the assertion's own line, and `nested_array_3d_row_pointer_fail` raises a
+dereference-alignment claim ahead of it, so `^VERIFICATION FAILED$` alone would
+be satisfied by a claim the row is not about. The pins agree under Bitwuzla and
+Z3, and mutating one of them to a property id the run does not produce fails
+the test.
+
+**The last pair was added by the coverage gate, and it is the only one that
+reaches its line.** `is_flattened_row`'s `ite` arm is a two-operand `||`, and
+every `ite` the other eleven tests build comes from `push_row_read`'s own
+`with` arm, whose `true_value` is always a row -- so the `||` short-circuits
+and the second operand is never evaluated. A `memcpy` into the *innermost* row
+of a 3-D array, read back at **two** nondet subscripts, evaluates it 4 times.
+One nondet subscript does not, and neither does the existing 2-D
+`nested_array_row_memcpy` nor the 3-D `nested_array_plane_memcpy`. The gate
+found this by an address-level execution census, which is a sharper instrument
+than the arm census below and worth reaching for first next time.
+
+| Artefact | Invocation | Result |
+|---|---|---|
+| the 12 new tests | default, and again `--z3` | identical verdicts under both solvers |
+| `-L esbmc` | `ctest -j8`, 120 s cap, 6229 tests | 19 failures, and the **same 19** on a separately linked pre-patch binary — zero regressions. A first `-j8` run failed 8 more that pass at `-j2`; they are parallelism flakes |
+| unit tests | `ctest -LE regression -j6` | 771/771 |
+| arm census | 2034 `regression/esbmc` inputs, per-arm `fprintf` | ran against an intermediate binary carrying the abandoned store-side draft, so it settles only that draft's two arms, which fired **nowhere** and were deleted. It does **not** attest the shipped shape: re-measured there, the 2034 inputs fire no arm this entry adds, and the pre-existing 2-D tests fire the `with` arm only. That re-measurement is the coverage gate's, at address level, not this row's |
+| subscript signedness | a signed write index against an unsigned read at 3-D, both aliasing directions | correct both ways, 5 live VCCs, under both solvers — not added as a test, since the assumed range makes it pass with the widening removed |
+| `memcpy` row copy, `int a[2][N]` | N = 128 / 256 / 512, wall clock | 3.3 / 2.0 / 23 s, within noise of the merge base — the residual below is neither helped nor worsened |
+| `git clang-format --diff HEAD` | changed lines only | clean |
+
+**The gate's dimension clause goes entirely, and 4-D is the check on that.**
+R50 bounded it at two after three weak probes said the bound was unnecessary;
+this entry does not repeat that mistake by measuring only three dimensions.
+`nested_array_4d_outer_read` writes sixteen elements through four nested loops
+and reads the outermost subscript at a nondet index — the shape that broke 3-D,
+one dimension deeper. It aborts with the gate lifted and the encoder unfixed,
+and decides with the fix, so the depth is not a special case that happens to
+work. R42's 256-element cap is the only bound the gate still carries.
+
+**Still open, unchanged from R50.** `expand_row_stores` names every element of
+a row a `memcpy` grafts whole, and nothing bounds that enumeration — the cap
+above gates constant propagation, and a chain built by the `memcpy` layer never
+passes through it. This entry does not touch that path.
+
+---
+
+### M9 (R52) — 2026-09-02, the propagated chain is a DAG, and three walks read it as a tree
+
+R50 taught symex to propagate a bound stored in a 2-D array. The expression it
+now builds is a `with` chain, and each store references the chain **twice** —
+once as the store's source, once inside the `index` naming the row it updates.
+That is a DAG. Three separate walks traverse it without memoisation, so each
+visits a number of paths exponential in the store count, and the non-const
+`Foreach_operand` calls `irep_container::detach()` on every node it reaches,
+materialising each shared subtree into a private copy.
+
+**The wall is the store count, not the nesting.** Measured on the pre-fix
+binary under `--no-simplify`, with an 8 GB cap:
+
+| shape | fast | slow | exhausts memory |
+|---|---|---|---|
+| 2-D `a[16][16]` | 16 stores, 0.45 s | 20 stores, 7.5 s | 24 stores |
+| 3-D `a[4][4][4]` | 8 stores, 0.03 s | 12 stores, 2.6 s | 16 stores |
+| 4-D `a[2][2][2][2]` | 8 stores, 0.39 s | — | 12 stores |
+
+Roughly ×2 per store at two dimensions. Depth raises the branching factor, so
+the knee arrives earlier; it does not create the problem. A depth cap — the
+obvious first fix — therefore does **not** work: 2-D at 64 stores and 3-D at
+256 stores both exhaust memory.
+
+**Attribution, by three binaries built from one tree.** The merge base is fast
+at every store count, because the gate declines the shape and the expression
+never forms. This branch reproduces the knee exactly at 2-D. R51 leaves the 2-D
+numbers unchanged and brings ≥3-D to the same wall. So **R50's fix owns the
+defect**, and R51 only widens which programs meet it.
+
+**Three walks, not one**, all over the same DAG:
+
+| site | cost | fix |
+|---|---|---|
+| `renaming::renaming_levelt::get_original_name`, `renaming.cpp:347` | 12 GB → 84 MB | memoise, **shared nodes only** |
+| `pre_register_addresses`, `symex_target_equation.cpp:30` | time only (const walk) | visited set |
+| `value_sett::get_value_set_rec`, `value_set.cpp:603` | time and memory | memoise on (expr, suffix, original_type, under_deref) |
+
+**Caching every node is wrong, and the unit suite says so.** Holding the
+original container alive to stop its address being recycled is what makes the
+key safe — but that extra reference forces `detach()` to clone even an
+*unshared* node, which destroys the in-place rewrite
+`goto_symex_statet::assignment` (`goto_symex_state.cpp:432`) relies on when it
+renames `l1_rhs` before handing it to `value_set.assign`.
+The symptom is the overapproximation unit test *the post-havoc value-set filter
+drops the sink, not the candidate* going 0 → 3 on `mentions_invalid_object`.
+Gating on `refcount > 1` avoids it and costs nothing: an unshared node is
+visited once anyway, so caching it could never pay.
+
+**Default configuration is not affected**, and that is why nothing caught this:
+the simplifier folds the chain before any of the three walks sees it, so the
+blowup needs `--no-simplify`. The regression tree has 143 tests using that
+flag and **none** of them combines it with an array of two or more dimensions.
+
+**The regression test pins time, because it cannot pin memory.**
+`--memlimit` is the natural discriminator — 84 MB against 18.4 GB — but
+`regression/testing_tool.py:526` lists it in `UNSUPPORTED_OPTIONS` and strips
+it. With all three sites fixed the separation is wide enough not to need it:
+`a[8][8]` with 32 stores runs 0.27 s post-fix and does not terminate pre-fix
+(131 s and 18.4 GB, against the harness's 120 s cap), so
+`nested_array_no_simplify_scale{,_fail}` change verdict on the fix. With only
+*two* of the three sites fixed the same program took 52 s at 25 stores, which
+is why the third site had to be closed before a test could be written at all.
+
+**A fourth walk survives, in the debug printers.** `migrate_expr_back`
+(`src/util/irep/migrate.cpp:3152`) expands the DAG into an `irept` **tree** with
+no memoisation, and `SSA_stept::output` reaches it from `--ssa-trace`
+(`symex_target_equation.cpp:98`) and `--show-vcc` (`bmc.cpp:2234`). Measured on
+the **fixed** binary, same shape: 14 stores 1.56 s / 412 MB, 20 stores 11.1 s /
+3.4 GB under `--show-vcc`, and the 32-store test killed at 222 s / **59.5 GB**
+under `--ssa-trace`. So this row's own reproducer cannot be inspected with the
+standard tools. The counterexample printer is unaffected — `build_goto_trace`
+prints solver-materialised values, not the chain — so the `_fail` test still
+completes in 0.33 s. Left open: the fix belongs in `migrate_expr_back` or a
+printer-level memo, not in the three walks this entry closes.
+
+**A fourth walk arrived from master while this branch was open.** #7449's
+`note_division_operands` recurses through `foreach_operand` with no visited
+set, so merging master hung this row's own reproducer indefinitely against
+0.86 s before it. Memoised the same way on the merge. Any future walk over an
+SSA step's expressions has to do the same; the shape is not going away.
+
+---
+
+### M9 (R21 re-measured) — 2026-09-05, the limitation that stopped being one
+
+R21's row read **Closed as a stated limitation** — `ptr_int_multiply_roundtrip`
+kept as a KNOWNBUG marker, "Still reproduces by design." It does not. On
+master the row's own reproducer proves:
+
+```
+uintptr_t u = (uintptr_t)&s; u *= 2; u -= (uintptr_t)&s;
+*(int *)u = 3; assert(s.x == 3);   →  SUCCESSFUL, 5 VCCs live
+```
+
+Not vacuously: mutating the assertion to `s.x == 4` reports FAILED over the
+same 5 claims, so the store lands and the recovered pointer names `s`.
+
+**#6905 closed it on 2026-08-11, and the reason the limitation reading was
+wrong is worth keeping.** `docs/design/pointer-integer-provenance.md` argued
+the obvious fix is unsound, and it is — but the unsoundness belongs to
+*dropping* the `unknown`, which deletes the `invalid pointer` property.
+Unioning it into the result recovers the object while keeping that property,
+which is what `get_value_set_rec` now does for `add2t`/`sub2t` when one
+operand's set holds nothing but `unknown`. The design doc was updated with the
+fix; this row and the test's own comment were not, and the comment still told
+a reader the test reports FAILED.
+
+**What the row should have said, and the lesson.** A row closed as a
+limitation is a row nobody re-measures, and this one stayed wrong for three
+weeks while the design doc beside it was right. §9.2's status column is the
+prioritised backlog: "closed as a limitation" needs the same re-measurement
+discipline as "open", because the argument that made something a limitation
+can be refuted by a later fix without anyone revisiting the row. R20 and R26
+were re-checked at the same time and both are accurately recorded as fixed.
+### M9 (R50 residual) — 2026-09-05, the enumeration is quadratic, and the cap does bound it
+
+R50 left `expand_row_stores`' element enumeration open on the reading that
+"the growth is quadratic and, unlike the propagation path, nothing bounds it:
+`array_may_propagate`'s 256-element cap gates constant propagation only, and a
+chain built by the `memcpy` layer never passes through it." The first half is
+right and the second is **wrong**, which inverts the row's priority.
+
+**Counted, not timed.** A counter on `expand_row_stores` (calls, and stores
+pushed) over `int a[2][N]`, all elements written, then one `memcpy` between
+rows, read back at a nondet index:
+
+| N | flattened | calls | stores | time |
+|---|---|---|---|---|
+| 120 | 240 | 479 | 57,480 | 0.58 s |
+| 127 | 254 | 507 | 64,389 | 0.66 s |
+| 128 | **256** | 511 | **65,408** | 0.65 s |
+| 129 | 258 | **1** | **129** | 0.18 s |
+
+One element past the cap the function fires **once**. It is not bypassed by
+the `memcpy` layer at all: above the cap the array does not propagate, so no
+`with` chain is composed and there is nothing to enumerate. Below it the count
+is `(2E - 1) · N` for `E` elements and row length `N`, and since `N <= E/2`
+with `E <= 256` the ceiling is `511 · 128 = 65,408` stores — the measured
+worst case, reached exactly at the cap. **The residual is bounded, at 0.67 s.**
+
+**What actually triggers it is the write order, which the row does not say.**
+Writing the array row by row costs 3 calls and 384 stores at `a[2][128]`;
+interleaving the rows — `a[0][k]`, `a[1][k]`, `a[0][k+1]`, … — costs 511 calls
+and 65,408. `decompose_stores` updates a row in place only when that row's own
+chain is rooted at the row being replaced, and alternating between rows breaks
+that rooting at every step, so each store falls through to the whole-row
+enumeration. Shape is not the variable: at a fixed element count the store
+count tracks the row length alone (`a[4][64]` 32,704, `a[8][32]` 16,352,
+`a[16][16]` 8,176, all at 511 calls), so `a[2][128]` is the worst shape.
+
+**The recommended fix would have bought nothing.** The row proposed to "stop
+naming a row's elements as selects out of the row". A control that writes the
+same N elements into the row directly, never reaching `expand_row_stores`,
+costs the same or more at every size measured — 0.45 s against 0.52 s at
+N=256, 3.15 s against 2.55 s at 512, 39.9 s against 33.2 s at 1024. The
+naming is not where the time is.
+
+Those above-cap numbers are also a reminder that a slow nested-array program
+is not evidence for this row: at N=1024 `expand_row_stores` contributes one
+call and 1024 stores, and the 33 s is ordinary encoding of a 2048-element
+array. R52's memoisation moved the whole ladder about 2x faster than the
+figures R50 recorded, so those are stale as well.
+
+**Closed as bounded, not fixed.** The remaining R50 residual is the 3-D bound,
+which is in flight separately.
+
+---
+
+### M9 (R52 residual) — 2026-09-05, the fourth walk, and the wall behind it
+
+R52 closed three unmemoised walks over the propagated store DAG and left a
+fourth: `migrate_expr_back` (`src/util/irep/migrate.cpp`) expands the same DAG
+into a legacy `irept` **tree**, and `SSA_stept::output` reaches it from
+`--ssa-trace` and `--show-vcc`. Memoising it on node identity, measured on
+`a[8][8]` under `--no-simplify --show-vcc`:
+
+| stores | before | after |
+|---|---|---|
+| 16 | 1.26 GB, 1.28 s | 0.13 GB, 0.99 s |
+| 18 | 4.78 GB, 5.72 s | 0.27 GB, 1.60 s |
+
+**The R52 detach trap does not arise here, and that is a property of the walk,
+not a precaution.** `get_original_name` had to gate its cache on `refcount > 1`
+because it *rewrites* the tree, so holding the original alive forced
+`detach()` to clone an otherwise-unshared node. This walk is const: the
+outermost caller's `expr2tc` already holds every node it reaches, so the cache
+needs no reference of its own and no node's refcount moves. What that buys is
+paid for by scope — an address is a valid key only while that caller is on the
+stack, so the map is dropped when the outermost call returns rather than
+persisting between calls.
+
+**The `refcount > 1` gate does not transfer either, and the reason is worth
+recording.** It was carried over from `get_original_name` on the argument that
+an unshared node is reached once anyway. That argument is false here, and
+measurably so: `migrate_type_back` is *not* memoised, so an array type's size
+expression -- owned by one `array_type2t`, hence `refcount == 1` -- is
+re-migrated once per occurrence of that type, 243 times in the worst walk over
+`regression/csmith/csmith02`. The gate was also worth nothing: 0.94 s with it
+and 0.95 s without, best-of-five on that input. It is dropped, which deletes a
+branch and a false comment at no measured cost. The same sentence in
+`renaming.cpp` *is* true, because that walk is a `Foreach_operand` and never
+descends into a type.
+
+**The reproducer still cannot be inspected, and the migration is no longer
+why.** The output *text* is exponential in the store count on its own, because
+the format prints a DAG as a tree: 91 MB at 20 stores, 365 MB at 22, 1.46 GB
+at 24, ×4 per store pair, on the fixed binary. R52's own 32-store test is
+therefore still out of reach under either flag. Closing it means changing what
+those two flags *print* — emitting the sharing rather than expanding it — which
+is a decision about a diagnostic format and not about migration, so it is left
+separate. Neither flag is passed by
+`scripts/competitions/svcomp/esbmc-wrapper.py`, so no competition verdict
+depends on it.
+
+**Pinned by unit tests, not a regression pair.** `--show-vcc` exits before
+printing a verdict, so there is no verdict for a pair to change, and a store
+count small enough for the harness is small enough to pass either way. Three
+cases in `unit/util/migrate.test.cpp` build the DAG directly, and two
+mutations discharge them. Bypassing the cache takes *expands a shared subtree
+once* from under a millisecond to 1538 ms against its 300 ms bound -- the
+store count is 18 rather than the 30 first written, because 30 exhausts memory
+instead of failing, and a test that OOM-kills its binary takes the rest of the
+suite with it. Removing the depth-0 clear aborts the run outright, which is
+what pins the one failure mode address keying actually has: nothing else stops
+a second call reading a freed node's entry at an address the allocator
+reissued. *round-trips a shared subtree* pins that the memoised expansion is
+correct rather than merely fast.
+
+### M9 (self-verification re-measure) — 2026-09-06, parsing closed, and the blocker moved to conversion
+
+§13.2's last two re-measurements and §14 items 1(a) and 8 were all stale, in
+the same direction: each named a blocker that had since closed. Re-run on
+ESBMC 8.5.0, tree `072b6f82dc`, macOS arm64, homebrew `immer` and boost.
+
+**Parsing is closed.** `--parse-tree-only` over
+`#include <goto-symex/renaming.h>` emits **zero** errors. The three-item boost
+residue M9 (G9) recorded — `std::basic_string_view` and `std::basic_streambuf`
+absent as templates, `swprintf`/`vswprintf` undeclared — is gone. A real
+translation unit, `src/goto-symex/execution_state.cpp`, is down to seven
+distinct errors, all library-model and none in ESBMC's own headers: `<regex>`
+not found, `std::u16string`/`u32string` absent, `basic_string::rbegin` absent,
+the `istream &(istream &)` manipulator overload missing (5 occurrences), and
+`abs` ambiguous.
+
+**The blocker moved one stage downstream, which is why nothing noticed it
+closing.** Every distance-to-parse probe in this document, from §13.1 onward,
+used `--parse-tree-only`, and that flag stops before conversion. The same
+include with an empty `main` aborts the binary at
+`src/clang-c-frontend/clang_c_convert.cpp:2875`,
+`assert(init_stmt.getNumInits() == 1)`. Bisecting `renaming.h`'s include graph
+one header at a time:
+
+| Header | Verdict |
+|---|---|
+| `immer/map.hpp`, `immer/vector.hpp` | converts, `VERIFICATION SUCCESSFUL` |
+| `goto-symex/level1_map.h`, `goto-symex/symex_invariant.h` | converts, `VERIFICATION SUCCESSFUL` |
+| `irep2/irep2.h`, `util/irep/irep.h`, `util/irep/std_expr.h`, `util/base/i2string.h` | converts, `VERIFICATION SUCCESSFUL` |
+| `irep2/irep2_expr.h` → `irep2/guard_seq.h` → `renaming.h` | **G12** — `assert(init_stmt.getNumInits() == 1)` aborts |
+| `util/symtab/symbol.h` | **G13** — `ERROR: CONVERSION ERROR` |
+
+**G12** is a dependent `InitListExpr` of type `'void'` inside an
+*uninstantiated* template body: `boost::detail::function::basic_vtable`'s
+`stored_vtable`, whose two initialisers are `DependentScopeDeclRefExpr`s. The
+`InitListExpr` arm handles struct/array/vector, union, and the empty-scalar
+case, then asserts a single initialiser; a dependent list matches none of
+them. It is a *combination*, not a header — `boost/function.hpp` on its own
+converts and verifies — so the first step on it is a reduction, which is what
+`creduce-reducer` is for. **G13** is an `__atomic_*` builtin applied to an
+anonymous-union member, `boost/smart_ptr/detail/spinlock_gcc_atomic.hpp:38`.
+
+**A weaker Tier B′ than WI-4 asks for already runs, and it is not vacuous.**
+The empty-`main` rows above prove only that a header's *declarations* convert;
+that trap is worth naming, because "`#include <X>` verified SUCCESSFUL" reads
+like far more than it is. Driving the real class is the real test:
+
+```cpp
+#include <util/irep/irep.h>
+int main() {
+  irep_idt a("alpha"), b("beta"), a2("alpha");
+  assert(a == a2);
+  assert(!(a == b));
+}
+```
+
+reports `VERIFICATION FAILED` in 10 s with a counterexample giving all three
+`.no = 4294967295`. **That is a harness artefact, not a defect**, and the
+distinction cost the run its value until it was chased: `string_pool::get` is
+declared in `string_pool.h` but defined in `string_pool.cpp`, so ESBMC treats
+it as unbodied and returns nondet, and nothing then distinguishes the three
+indices. Pulling the body in with `#include <util/base/string_pool.cpp>`
+**times out at 500 s** — the interning `unordered_map` is exactly §13.3's
+cost. Passing the two `.cpp` files on one command line does not work either:
+ESBMC's C++ frontend is single-TU and processes only the last, reporting
+`main symbol 'main' not found`.
+
+**Tractability moved, and the direction of §14 item 1(b) did not.** §13.3's
+4-key probe, re-run unchanged:
+
+| `--unwind` | 2026-07-27 (8.4.0, Linux x86_64) | 2026-09-06 (8.5.0, macOS arm64) |
+|---|---|---|
+| 5 | 85.9 s | 54.9 s, `SUCCESSFUL` |
+| 8 | > 280 s — timeout | 97.4 s, `SUCCESSFUL` |
+| 12 | — | 181 s |
+| 16 | — | 305 s |
+
+The cliff between 5 and 8 is gone and cost is roughly linear in the bound.
+**Host and architecture differ from the original row, so this is not a clean
+A/B and must be re-run on Linux before the figures are cited** — the same
+caveat M9 (G9) attached to its own residue, for the same reason. What the
+change buys is a larger affordable Tier B′ harness, not whole-TU verification:
+the `irep_idt` probe above still times out.
+
+**The lesson is M9 (R21)'s, applied to a different column.** R21 stayed
+recorded as a limitation for three weeks after a fix closed it, because a row
+closed as a limitation is a row nobody re-measures. §13.2 and §14 item 1(a)
+have the same shape — a *blocker* nobody re-measures — and did the same
+thing three times over: G1–G7 closed without notice, then G9, then the boost
+residue. All three were found by re-running the probe, never by prediction.
+The probe is eight lines and in Appendix C; it should be run at the top of
+every milestone, not when something else prompts it.
+
+| Artefact | Invocation | Verdict |
+|---|---|---|
+| `#include <goto-symex/renaming.h>` | `--std c++23 --parse-tree-only` | 0 errors |
+| same | `--std c++23 --unwind 2` | abort, `clang_c_convert.cpp:2875` (G12) |
+| `#include <util/symtab/symbol.h>` | `--std c++23 --unwind 1` | `CONVERSION ERROR` (G13) |
+| `src/goto-symex/execution_state.cpp` | `--std c++23 --parse-tree-only` | 7 distinct errors, all library-model |
+| `irep_idt` probe, header only | `--std c++23 --unwind 6` | `FAILED` in 10 s — unbodied `get`, not a defect |
+| same, `#include`ing `string_pool.cpp` | `--std c++23 --unwind 6` | timeout at 500 s |
+
+**No §9.2 row moves and no property in §8 is claimed.** This entry re-measures
+§13 and §14 only.
+
+> **Correction, 2026-09-06 (same day) — both G12 and G13 were mis-attributed
+> above; see M9 (G12/G13 attribution corrected).** The G12 row named
+> `boost::detail::function::basic_vtable` and the G13 row named an
+> anonymous-union member. Neither is the cause. The tables in §13.2 and §14
+> item 1(a) carry the corrected text; this entry's own body is left as written
+> because §15 is append-only.
+
+### M9 (G12/G13 attribution corrected) — 2026-09-06, two causes asserted instead of bisected
+
+The entry above named a cause for each of G12 and G13. Both were wrong, and
+they were wrong in the same way: a plausible candidate was read off a large
+dump and asserted, rather than bisected to.
+
+**G13 is `__atomic_test_and_set` and `__atomic_clear`, not a union.** The row
+said "`__atomic_*` builtin applied to an anonymous-union member", taken from
+the source line `boost/smart_ptr/detail/spinlock_gcc_atomic.hpp:38` that the
+error pointed at — where an anonymous union does appear. Deleting the union
+from a hand-written copy changes nothing; both versions fail identically. A
+census of the seven builtins settles it:
+
+| Builtin | Verdict |
+|---|---|
+| `__atomic_load_n`, `__atomic_store_n`, `__atomic_fetch_add`, `__atomic_exchange_n`, `__atomic_compare_exchange_n` | `VERIFICATION SUCCESSFUL` |
+| `__atomic_test_and_set`, `__atomic_clear` | `ERROR: Unknown Atomic expression` → `CONVERSION ERROR` |
+
+`clang_c_convert.cpp:4620-4700` switches on 21 `AO__atomic_*` cases and those
+two are absent; `log_error("Unknown Atomic expression")` at 4701 is the default
+arm. It reproduces in three lines of **C**, so it is a `clang-c-frontend`
+defect and not a C++ or boost one at all:
+
+```c
+unsigned char c;
+int main(){ return __atomic_test_and_set(&c, __ATOMIC_ACQUIRE); }
+```
+
+**G12's cause is not established, and the boost attribution was a guess.** It
+came from picking one `InitListExpr` out of the 124 in a 328k-line AST dump
+because its shape — a dependent list of type `'void'` with two
+initialisers — matched the assertion. Bisecting the include graph one header at a time
+instead puts the trigger somewhere else entirely: `irep2/irep2.h` converts and
+verifies, **every** one of `irep2_type.h`'s own includes converts and verifies
+(`optional`, `irep2/irep2.h`), and `irep2/irep2_type.h` aborts. The trigger is
+in that header's own 586 lines, and boost is not on the path. Four
+hand-reductions failed to reproduce it — a dependent typedef chain, a nested
+initialiser list behind a parameter pack, `std::make_tuple` of member pointers
+as a `constexpr` static, and a `constexpr` static of dependent type — so the
+next step is C-Reduce, not another guess.
+
+**The lesson is M9 (R21)'s again, one level down.** R21 was a row nobody
+re-measured; this was a cause nobody bisected. Both cost the same thing: a
+plausible statement in a document that a later reader has no reason to doubt.
+The bisect that found the real answer took nine `esbmc` invocations and less
+time than writing the wrong sentence did. **A cause read off a dump is a
+hypothesis; only the bisect that isolates it makes it a finding**, and §9.2's
+own preamble already says as much for code-level findings — it applies to
+tooling blockers too.
+
+| Artefact | Invocation | Verdict |
+|---|---|---|
+| `__atomic_test_and_set` on a plain `unsigned char` | default, C | `Unknown Atomic expression` |
+| same, with the anonymous union restored | `--std c++23` | identical — the union is not load-bearing |
+| five other `__atomic_*` builtins | `--std c++23` | `VERIFICATION SUCCESSFUL` |
+| `#include <irep2/irep2.h>` | `--std c++23 --unwind 1` | `VERIFICATION SUCCESSFUL` |
+| `#include <irep2/irep2_type.h>` | `--std c++23 --unwind 1` | abort at `clang_c_convert.cpp:2875` |
+
+### M9 (G12 reduced) — 2026-09-06, 586 lines to five, and a subagent's answer that was not a reduction
+
+G12's row said "C-Reduce is the next step". It was run, and the result is
+#7643's reproducer: `src/irep2/irep2_type.h` reduces from 586 lines to five,
+121 bytes, still aborting at `clang_c_convert.cpp:2875`.
+
+```cpp
+#include <irep2/irep2.h>
+class a : type2t {
+  std::vector<irep_idt> b;
+  static constexpr auto c = make_tuple(&a::b);
+};
+```
+
+**The predicate is the part worth copying.** It required four things at once:
+no `PARSING ERROR`, `Converting` reached, the substring
+`init_stmt.getNumInits() == 1`, and `clang_c_convert.cpp, line 2875`. The
+first two are what stop C-Reduce from producing ill-formed C++ that dies
+earlier in the parser — the standard failure mode, and one that looks exactly
+like success. It returns 0 on the reduced file in a clean temporary directory
+and non-zero on `int main(){return 0;}`.
+
+**Two setup traps cost a run each.** C-Reduce copies *only* the file under
+reduction into its temporary directory, so a predicate that reads a driver
+`t.cpp` or a sibling `type_kinds.inc` from the invocation directory fails on
+the original input and C-Reduce refuses to start. The script has to synthesise
+its own driver and copy its own auxiliary files from an absolute path. Second,
+`irep2_type.h` includes `<irep2/type_kinds.inc>` by angle-bracket path, which
+has to be rewritten to a quoted relative include before the header can be
+reduced in isolation.
+
+**What is isolated and what is not.** The construct is a `static constexpr
+auto` initialised from `std::make_tuple` of a pointer-to-member, in a class
+deriving from `type2t`, with a `std::vector<irep_idt>` member. Which
+ingredient is load-bearing is still open — four standalone variants all reach
+`VERIFICATION SUCCESSFUL`:
+
+| Variant | Verdict |
+|---|---|
+| `std::make_tuple()`, no arguments | `SUCCESSFUL` |
+| `std::make_tuple(&S::a, &S::b)`, `int` members | `SUCCESSFUL` |
+| `std::make_tuple(&S::v)`, `std::vector<int>` member | `SUCCESSFUL` |
+| same over the **real** `irep_idt` (`#include <util/irep/irep_idt.h>`) | `SUCCESSFUL` |
+
+So `irep_idt` is not sufficient on its own and something else reached through
+`irep2.h` — most plausibly the `type2t` base — is required. Re-reducing with
+`irep2.h` inlined would settle it; the predicate is reusable unchanged.
+
+**A one-line input hits the same assertion, and is not a reduction of this
+header.** `__complex__ int c = {1, 2};` aborts identically;
+`__complex__ int c = {1};` verifies. `_Complex` is a scalar builtin that takes
+a two-element brace-init, so it is neither struct/array/vector nor union and
+has more than zero initialisers — the one combination the arm does not cover.
+It is a clean self-contained case for the missing arm and is recorded as such,
+**separately** from the header case, because nothing establishes the two share
+a trigger beyond the `assert` they both land on.
+
+**That separation is the entry's real content.** The one-liner arrived from a
+`creduce-reducer` subagent reporting "586 lines to 1 line, no C-Reduce run
+needed", having reasoned from a *comment* in `irep2_type.h` mentioning
+`_Complex` and a class named `complex_type2t` to the conclusion that
+`__complex__` was the trigger. `complex_type2t` is an irep2 IR class; the
+header contains no `__complex__` declaration, as `grep` shows in one command.
+The reproducer is real and the bug is real; the attribution was word
+association. Taking it at face value would have put a confident wrong root
+cause into #7643 — the same defect M9 (G12/G13 attribution corrected) had just
+been written to fix, one working day earlier. **A subagent's root cause is a
+hypothesis with the same status as one's own**, and the check that settled it
+cost one `grep`.
+
+| Artefact | Invocation | Verdict |
+|---|---|---|
+| reduced `irep2_type.h`, 5 lines | `--std c++23 --unwind 1` | abort at `clang_c_convert.cpp:2875` |
+| predicate in a clean `mktemp -d` | `test.sh` | 0 on reduced, 1 on `int main(){return 0;}` |
+| `__complex__ int c = {1, 2};` | default | abort, same line |
+| `__complex__ int c = {1};` | default | `VERIFICATION SUCCESSFUL` |
+| four `make_tuple` variants above | `--std c++23` | `VERIFICATION SUCCESSFUL` |
+
+### M9 (G14, R53) — 2026-09-24, the self-verification blocker was a false SUCCESSFUL
+
+G12 and G13 are closed on master (G12 by #7702, #7801 and #7938; G13 by #7658): `util/symtab/symbol.h`
+verifies, and `irep2/irep2_type.h` and `goto-symex/state/renaming.h` convert.
+Both then aborted during symex, which is new: `symex_assign_member` built a
+`with2t` whose value type did not match the member, and
+`assert_type_compat_for_with` (`irep2_expr.cpp:333`) fired. Recorded as **G14**.
+
+**Reduction.** The ten local headers `irep2_type.h` reaches were inlined into
+one 144,899-byte TU, leaving the library includes alone so ESBMC's own C++
+models still resolve them. C-Reduce took that to 210 bytes. The predicate
+required no `PARSING ERROR`, `Starting Bounded Model Checking`, and the exact
+assertion text. It returned non-zero on `int main(){return 0;}`. Two classes,
+each with `static constexpr auto c = std::make_tuple(&X::m)`, one member `int`
+and one `std::vector<int>`: one class alone, two `int` members, or two vector
+members all verify.
+
+**Cause.** The GOTO dump has a single `make_tuple`
+(`c:@N@std@F@make_tuple<#p1 >#&&S0_#`) typed for the vector instantiation, and
+both calls reach it. Clang's USR spells a member-pointer template argument as
+nothing, so the two specialisations share an id. The abort is where the
+collision happens to surface. The same collision gives wrong verdicts without
+an abort:
+
+| Program | Before | After | Native |
+|---|---|---|---|
+| `get<T>` returns `traits<T>::v`; assert `get(&A::b) == 1`, `get(&B::e) == 2` | `FAILED` | `SUCCESSFUL` | passes |
+| same, first assertion `== 2` | **`SUCCESSFUL`** (Bitwuzla, Z3) | `FAILED` | aborts |
+| `W<T>::get()` over the same traits, `W<int A::*>`, `W<long B::*>` | `FAILED` | `SUCCESSFUL` | passes |
+| same, first assertion `== 2` | **`SUCCESSFUL`** | `FAILED` | aborts |
+| the 210-byte G14 reproducer, `--std c++23` | abort | `SUCCESSFUL` | — |
+
+**R53, fixed.** `usr_gap_suffix` walks the declaration's contexts,
+printing the template arguments of every function, class and variable
+specialisation on the way and the canonical type of every function, and
+appends that text to a USR-derived id when it contains `::*`. The function
+type is needed because review found the same collision on plain overloads,
+`int f(int A::*)` and `int f(long B::*)`, both `c:@F@f# #`, and on function
+templates overloaded only by such a parameter. Ids with no member pointer are
+byte-identical, so the change reaches only programs the collision already
+broke. Records needed nothing: their ids come from `getFullyQualifiedName`,
+which spells the type. Redeclarations spelled through an alias, an out-of-line
+member of a specialisation, and an `extern template` followed by an explicit
+instantiation each still produce one symbol, because the stored arguments are
+canonical. Nine tests pin it, each mutation-checked against the unfixed
+binary: `regression/esbmc-cpp/cpp/member_pointer_template_arg{,_fail}`,
+`member_pointer_class_template_arg{,_fail}`, `member_pointer_overload{,_fail}`,
+`member_pointer_var_template{,_fail}` and `member_pointer_make_tuple` (the G14
+reproducer).
+
+**The nullptr residual, fixed the same day.** A `nullptr` non-type template
+argument is also spelled as nothing by the USR, and it prints as a bare
+`nullptr`: `template<auto P>` at `(int *)nullptr` and `(long *)nullptr` was
+`c:@F@g<#>#` for both and reported a false SUCCESSFUL, and so did the
+member-pointer form. `usr_gap_suffix` now also records each nullptr
+argument's type, through packs, and appends the suffix when there is one:
+`regression/esbmc-cpp/cpp/nullptr_template_arg{,_fail}`. A C++20 class-type
+non-type argument makes ESBMC exit with `Unable to generate the USR`; that is
+separate and pre-existing.
+
+**Self-verification after the fix.**
+
+Invocation for every row: `--std c++23 --unwind 1 -Isrc -Ibuild/src
+-Isrc/util -Isrc/util/lib` plus the directory holding `immer`, `fmt` and
+`nlohmann` (`-I/opt/homebrew/include` on macOS).
+
+| Driver (`#include` + empty `main`) | Invocation | Verdict |
+|---|---|---|
+| `util/symtab/symbol.h` | as above | `SUCCESSFUL` (G13 closed) |
+| `irep2/irep2_type.h` | same | `SUCCESSFUL` (G14 closed) |
+| `goto-symex/state/renaming.h` | same | `SUCCESSFUL` (G14 closed) |
+| `goto-symex/state/goto_symex_state.h` | same | `PARSING ERROR`, not yet triaged |
+
+An empty `main` exercises only the headers' static initialisers. The next step
+is the one §13.6 WI-4 asks for: drive `renaming::level1t` from `main` and
+mutation-check an assertion on it.
+### M9 (G18, R55) — 2026-09-25, the self-verification violation was a hoisted initializer
+
+G18 was `dereference failure: invalid pointer` in the atomic model's
+`fetch_sub`, on an empty `main` that includes `irep2/irep2_utils.h`, with the
+sliced and unsliced runs disagreeing. Two id collisions found on the way, R53
+and R54, were real but not the cause: removing both left G18 unchanged.
+
+**Reduction.** A divergence predicate kept the reduction honest. The sliced
+`--z3` run had to fail on `fetch_sub` with `invalid pointer`, and the
+`--no-slice` run had to succeed. A genuine program defect would fail both, so
+C-Reduce could not converge on one. The ESBMC-tree headers were inlined with a
+guard-aware inliner (13,498 lines), and C-Reduce took that to 35 lines. The
+reduced program runs clean under ASan and UBSan. In it, a function-local
+`static h c = constant_bool2tc(false);` sits in a function nothing calls, and
+its initializer destroys a temporary whose pointer comes from a function with
+no body. `--goto-functions-only` shows `c=constant_bool2tc(0)` in
+`__ESBMC_main`, before `main`.
+
+**R55.** `get_var` hoists every static initializer into `static_lifetime_init`.
+Its own comment gives the reason: in C the initializer is a constant
+expression, so running it early "makes no difference". C++ runs a dynamic
+initializer the first time control passes the declaration ([stmt.dcl]/3), so
+the hoist is wrong in both directions:
+
+| Program | Before | After | Native |
+|---|---|---|---|
+| `static int c = bump();` in a function never called, `assert(g == 1)` | **`SUCCESSFUL`** | `FAILED` | aborts |
+| the same, `n()` called twice, `g` checked before and after | `FAILED` | `SUCCESSFUL` | passes |
+| `static T t(x)`, constructor counted, called with 3 then 9 | `FAILED` | `SUCCESSFUL` | passes |
+| an initializer that throws on its first call and is retried | `FAILED` | `SUCCESSFUL` | passes |
+| `static S s(gs)`, trivially copyable, `gs` changed before the call | `FAILED` | `SUCCESSFUL` | passes |
+| G18's 35-line reproducer | `FAILED` | `SUCCESSFUL` | passes |
+
+**Fixed.** A C++ function-local static whose initializer is not a constant
+initializer, and which is not an array, is left zero-initialised. The frontend
+adds a static `bool` `<id>$init_guard`, copying `is_thread_local`, and
+`convert_decl` lowers the declaration to
+`atomic { if (!guard) { init; guard = 1; } }`. The guard's presence in the
+symbol table is the marker, because a `#` flag on the declaration does not
+survive the IREP2 round trip in `goto_convert_functions`. The initializer goes
+through `convert_decl_initializer`, so a constructor builds the static in
+place.
+
+**Review changed the design.** The first version lowered the guard in the
+adjust pass as `x = init`. That builds a temporary, copies it, and destroys it,
+which produced a new false SUCCESSFUL (a destructor counter read 1 where native
+C++ reads 0). It also aborted on a trivially copyable struct whose declaration
+carried no initializer operand. It also missed `thread_local`, and it
+initialised twice under concurrent first calls. Moving the lowering to
+`convert_decl` and wrapping it in an atomic section fixed all four. Pulling
+the static arm out of `get_var` into `get_static_var_init` keeps the
+complexity gate passing.
+
+**Residuals.** Static local arrays keep the hoisted form. So does
+`--clang-cpp-irep2-adjust-only`, whose adjuster does not carry the guard;
+`has_dynamic_local_init` checks the option so that path is unchanged. ESBMC
+models no exit-time destructors for statics, before or after this change. The
+k-induction step havocs the guard and the static independently, which can turn
+a SUCCESSFUL into UNKNOWN; it cannot hide a bug.
+
+### M9 (R54) — 2026-09-24, a census of colliding ids, and a C false SUCCESSFUL it found
+
+G18's single-state counterexample suggested another naming collision, since
+G14 had been one. The census was instrumentation, not inference: a temporary
+hook in `clang_cpp_convertert::get_decl_name` recorded each id with the
+canonical declaration that produced it and printed every id reached by two
+different canonical declarations. On `#include <irep2/irep2_utils.h>`, the
+smallest header that reproduces G18, and after R53, it reported field and
+parameter names, which are component names and not symbols, and two record
+collisions: `tag-struct FMT_COMPILE_STRING`, the local struct fmt's
+`FMT_STRING` macro defines at every use, and `fmt::fstring<FMT_COMPILE_STRING,
+...>`, a specialisation over it.
+
+**The collision reproduces in six lines of C.** Two functions, each with a local
+`struct S`, share `tag-struct S`. With the members in opposite orders, a
+program that aborts natively reports `VERIFICATION SUCCESSFUL` under Bitwuzla
+and Z3. With different member types, symex aborts in
+`assert_type_compat_for_with`, the G14 assertion.
+
+| Program | Before | After | Native |
+|---|---|---|---|
+| C, `struct S { int a; int b; }` in `f`, `{ int b; int a; }` in `g`, `*(int *)&s = 7; return s.a;` both | **`SUCCESSFUL`** | `FAILED` | aborts |
+| C, `struct S { long a; }` in `f`, `{ char a; }` in `g` | abort | `SUCCESSFUL` | passes |
+| C++, `Box<S>` over each function's local `S` | abort | `SUCCESSFUL` | passes |
+| C++, same, one assertion wrong | abort | `FAILED` | aborts |
+| C++, local class in `h<char>` and `h<long>` | `SUCCESSFUL` | `SUCCESSFUL` | passes |
+
+The last row already worked: the specialisation's USR separated the two.
+**R54 is fixed** in `clang_c_convertert::get_decl_name`. A named local record
+is qualified by its enclosing function's id and its definition's line and
+column, plus the raw encoding of its macro location when a macro expanded it. The definition's
+location keeps a forward declaration on the same id. The location separates
+blocks of one function, the macro location separates blocks from one macro
+expansion, nested expansions included, and the function id separates instantiations of a function
+template. A record that is, or is a member of, a class template specialisation
+is qualified by the ids of the function-local declarations among its
+arguments: records, enums and declaration arguments, reached through packs,
+pointers, references, arrays, function types and nested specialisations. The
+suffix is identifier-shaped, because goto2c prints the name as a C tag and
+`reformat_class_name` splits on `:`. Disabling the specialisation arm brings
+the `Box<S>` abort back. The first version of that walk looped on reference
+types, because `getPointeeOrArrayElementType` does not unwrap them, and the
+converter hung in `Converting`.
+
+Code review found four of those shapes collided under the first version of
+the fix, and each is now separated: macro-expanded blocks (a false
+SUCCESSFUL), local-enum and declaration arguments, members of a specialisation,
+and forward declarations.
+
+**Residuals, measured.** Member-pointer template arguments were not walked at
+first; they now are, through `getMostRecentCXXRecordDecl`, which every
+supported LLVM has: `Box<int S::*>` over two functions' local `S` read `g`'s
+object through `f`'s one-field `S` and the solver aborted on the out-of-range
+tuple field (`local_member_pointer_template_arg{,_fail}`). Locals of blocks and captured regions have no enclosing
+`FunctionDecl`. Two same-named **variables** in one macro expansion still
+collide, because clang's USR for a local variable is its expansion offset:
+`{ struct S {...} s; } { struct S {...} s; }` from one macro now gets two
+records but one `c:p3.c@259@F@main@s`, and still reports a false SUCCESSFUL.
+That is a variable-naming defect, not a record one, and is left for its own
+change.
+
+**G18 is not caused by either collision.** With both removed, and the census
+reporting nothing else, `irep2_utils.h` still fails on the same `fetch_sub`
+claim. The slicer and the unsliced formula still disagree: with Z3, the sliced
+run reports `FAILED` and `--no-slice` reports `SUCCESSFUL`. With Bitwuzla,
+`--no-slice` aborts on a tuple-sort mismatch (`smt_tuple_node_ast.cpp:142`),
+or on an array-store width mismatch (`bitwuzla_conv.cpp:475`) under
+`--tuple-sym-flattener`. So the unsliced formula is ill-typed, and neither
+verdict can be trusted until the type error is found. G18 stays open, now as a
+slicer-versus-no-slice divergence on an ill-typed formula (the H-C1 oracle).
+
+### M9 (R56) — 2026-09-25, R54's variable residual, as a C false SUCCESSFUL
+
+R54 recorded that two same-named local variables in one macro expansion still
+collide, because clang's USR for a local variable is its expansion offset.
+Three lines of C turn that into a wrong verdict. With
+`#define TWO { unsigned char s = 200; r1 = s; } { int s = 1000; r2 = s; }`,
+both `s` are `c:t.c@113@F@main@s`, typed by the first. The second block's 1000
+is truncated to 232, so `assert(r2 == 232)` verifies under Bitwuzla and Z3,
+while native C aborts on it. `assert(r2 == 1000)`, which passes natively,
+fails.
+
+**Fixed** at the one place every USR-derived id is made: a local variable whose
+location is a macro expansion gets `_m<raw encoding>` of that location appended.
+Every expanded token has its own macro location, so this separates both the
+two `s` above and an inner macro expanded twice inside one outer expansion,
+which a spelling offset — the first version, and what #7530 uses for lambdas —
+does not: `OUTER` expanding `INNER(unsigned char, ...)` and `INNER(int, ...)`
+kept one `v` and a false SUCCESSFUL. A corpus-wide id census found that shape in
+bzip2 (`BZ2_decompress`) and in `container_of` (`github_2512_1`). Both halves of
+`regression/esbmc/macro_local_same_name{,_fail}` and `macro_local_nested{,_fail}` flip against the unfixed
+binary. R54's mixed shape, a record and a variable of the same names in one
+expansion, needs both fixes.
+
+### M9 (R57) — 2026-09-25, the abort a class-type template argument causes
+
+R53's review recorded that `template <S s>` instantiated at `S{1}` makes ESBMC
+exit with `Unable to generate the USR`. Clang's USR generator has no spelling
+for a class-type non-type argument, so it fails on the specialisation `g<S{1}>`,
+on members and constructors of `W<P{2}>`, on their parameters, and on the
+template parameter object `S{1}` names (a `TemplateParamObjectDecl`, which
+also never reaches the converter as a declaration).
+
+**Fixed.** When the USR fails, `get_mangled_id` names the declaration by its
+Itanium mangling. That mangling does encode the argument (`_Z1gIXtl1SLi2EEEEiv`).
+Constructors and destructors use their complete-object variants, and a
+parameter takes its function's mangled id plus its name and index. The
+fallback runs only where the USR would have aborted, so every existing id is
+unchanged. A reference to a template parameter object now adds its symbol on
+first use: a static object whose value is the `APValue` clang holds, converted
+by `get_APValue_expr`. The first version of the fix named the object but
+created no symbol, so `s.x` read an unconstrained value and a passing program
+reported `FAILED`.
+
+| Program (`--std c++20`) | Before | After | Native |
+|---|---|---|---|
+| `g<S{1}>() == 1` | abort | `SUCCESSFUL` | passes |
+| `g<S{1}>() == 2` | abort | `FAILED` | aborts |
+| `W<P{2}>`, constructor and `get()` | abort | `SUCCESSFUL` | passes |
+| `f<Out{{1}, 2}>()`, nested aggregate | abort | `SUCCESSFUL` | passes |
+
+`TemplateParamObjectDecl` is clang 12 and later, so its two uses are gated on
+`CLANG_VERSION_MAJOR`.
+### M9 (G15–G18) — 2026-09-24, `goto_symex_state.h` parses, and the first verdict is a violation
+
+With G12–G14 out of the way (§15 M9 (G14, R53), PR #7979), the remaining
+self-verification header, `goto-symex/state/goto_symex_state.h`, failed to
+parse on three operational-model gaps. Each was measured against native
+`clang++` with libc++ in C++11, 17 and 23, where all three compile and run:
+
+| ID | Gap | Model | Smallest failing input |
+|---|---|---|---|
+| **G15** | no `operator>>(istream &, istream &(*)(istream &))`, and `std::ws` declared but never defined | `src/cpp/library/istream` | `is >> std::ws`, from boost `property_tree` and yaml-cpp |
+| **G16** | no `std::u16string` / `std::u32string` | `src/cpp/library/string` | `std::u16string a;`, from boost `core/type_name.hpp` |
+| **G17** | `shared_ptr<void>` and `unique_ptr<void, D>` do not instantiate: `operator*` returns `T &` | `src/cpp/library/memory` | `std::shared_ptr<void> p;`, `goto_symex_state.h:110` |
+
+All three are fixed. `operator*` now returns `add_lvalue_reference<T>::type`,
+as libc++ declares it and [util.smartptr.shared.obs] requires, and
+`add_lvalue_reference` gains its cv-`void` specialisations so
+`shared_ptr<const void>` works too. `u16string`/`u32string` are gated at C++11,
+where `char16_t` exists; the tests pin `--std c++11`, and `--std c++98` turns
+`u16string_typedef` into a `PARSING ERROR`. Six tests:
+`regression/esbmc-cpp/cpp/{istream_ws_manip,u16string_typedef,smart_ptr_void}{,_fail}`.
+
+**G18, open.** With these fixes and R53 applied together, the header converts
+and symex completes. An empty `main` then reports `VERIFICATION FAILED`:
+`dereference failure: invalid pointer` in the atomic model's `fetch_sub`
+(`/esbmc-vfs/cpp/atomic:150`). The counterexample has a single state, so no
+program step precedes the violation; the neighbouring claims are in
+`irep_container` and `irep2.h`'s `release`, which decrements a reference count
+through that `fetch_sub`. Whether this is a model artefact or a real defect in
+how a static irep2 object is initialised is not yet known.
+
+### M9 (R59) — 2026-09-26, R44's residual reaches well-defined C
+
+R44 recorded that a walk whose two ends reach different members does not share
+a base, which for an `int *` is undefined behaviour anyway. A `char *` walk over
+the object representation is not: it is defined, and its trip count is a
+constant. Measured on master, `for (char *p = (char *)&s.a[0]; p !=
+(char *)&s.b[1]; ++p)` returned no verdict in 3,072 s, and so did the walk
+within one member, `(char *)&s.a[0]` up to `(char *)&s.a[1]` (2,544 s). With
+`--unwind 13` or `--smt-symex-guard`, both decide in under a second with the
+right verdict, so this is the R30 family: the exit rests on the guard folding.
+It never folds because `normalize_addressof_index` looks through `address_of`
+and pointer addition, not through a cast.
+
+**Fixed** in `byte_address_on_root`. A pointer to a byte, cast or not, of a
+member/index chain over a named struct, union or non-byte array is rewritten
+as `(char *)&root + byte offset`, using one canonical anchor for every byte view
+of the object. The canonical anchor is what makes both ends compare equal: a
+cast the frontend wrote and one the simplifier built printed identically but
+did not compare equal, and the first version stopped there. A bare byte base
+compares as `base + 0`.
+
+Code review of the first version found four defects; each is fixed, and each
+fix is visible in the code:
+
+| Defect in the first version | Evidence | Fix |
+|---|---|---|
+| The chain was rooted with `get_base_object`, which descends through a dereference, so `(char *)&p->y` became the address of the variable `p`. The same simplifier prunes claims before symex. | a division by zero UBSan reports was missed; a correct one was flagged | walk only member and index steps, and stop at anything else |
+| `&c` of a char scalar recursed forever: the anchor was a no-op cast that simplified back. | `github_5872_ptr_order_{pass,fail}` crashed | only a struct, union or non-byte array root, and never an uncast root |
+| The bare-base comparison ignored the pointee size. | `struct E {}; p != p + 1` reported SUCCESSFUL | bytes only |
+| A cast of `&huge_array` to `char *` tripped `array_type2t::get_width`. | `alloca_ptrdiff_max`, `vla_ptrdiff_max` aborted | anchor an array at its first element |
+
+Twelve CORE tests the first version broke pass again, as do the four new
+walk tests, which time out on master. `char_view_through_pointer{,_fail}`
+pass on master too; they pin the dereference defect rather than the original
+bug.
+
+### M9 (G18, R64, WI-4) — 2026-09-27, G18 does not reproduce, and WI-4's next wall
+
+**G18 does not reproduce on master.** With `goto-symex/state/goto_symex_state.h`
+included, an empty `main` verifies SUCCESSFUL in 7 s at `a751d4d186`, with and
+without `--no-slice`, and all 2,145 claims simplify away. It is also
+SUCCESSFUL at `b10750981a`, where R53 merged, so no later commit fixed it: the
+violation was measured on #7980's branch with a pre-merge R53 applied.
+
+**WI-4 still misses its gate.** `renaming::level1t l1;` converts, and symex
+never terminates: `level1t`'s destructor reaches immer's `delete_deep` and
+`destroy_n` over the empty map's node, whose count is not constant. A bare
+`immer::map<int, int> m;` does the same. Probing a copy of immer found the
+cause: the static empty node's reference count drops to one before the map is
+destroyed, so the map's own `dec()` frees it. The extra `dec()` came from
+`map`'s default member initializer `impl_t impl_ = impl_t::empty();`, a
+converting constructor from `node_t *` that ESBMC built into a temporary
+`champ`, copied into the member, and destroyed (R64).
+
+**R64, fixed.** A class-typed member initialised from a prvalue of its class is
+that prvalue's result object ([dcl.init]/17.6.1), and clang marks the
+pre-C++17 copy elidable and elides it. `get_member_initializer` converted the
+temporary clang binds the prvalue to, so every such member got a second object:
+`C impl_ = C::make();` copied a temporary in and destroyed it, `C impl_ =
+C{&x};` called the constructor on no object and copied a nondet temporary in,
+and `M() : impl_{C::make(&x)}` was read as aggregate initialisation, storing
+the temporary's address in `p`. `member_result_object` now peels the default
+member initializer, parentheses, the bound temporary, a transparent braced
+list ([dcl.init.list]/3.2), prvalue qualification and converting casts, and an
+elidable copy, so the constructor or call builds the member itself. Review
+found the `const` member, explicit-cast and parenthesised forms missing from
+the first version. The seven pairs
+`member_init_{prvalue_dtor,prvalue_value,braced_prvalue,const_prvalue,functional_cast,elided_copy,converting_ctor}{,_fail}`
+match the native program and are wrong on master, both halves. The C++ suites
+pass apart from local pre-existing failures.
+
+Not fixed, and unchanged by R64: a local `C c = C::make();` under
+`--std c++14` still destroys a surplus copy, members constructed before an
+initializer throws are not destroyed ([except.ctor]/3), mem-initializer
+temporaries die at the end of the constructor rather than of their
+full-expression, and the aggregate-initialisation surplus destructor pinned by
+`aggregate_init_temp_double_destroy` (KNOWNBUG) is a separate path.
+
+**WI-4's next wall.** With R64, the empty node is no longer freed on any path
+(`--unwind 1` passes a probe asserting it), yet the unbounded run still unwinds
+`destroy_n`: the refcount guard `root->dec()` reaches symex through placement
+new into static `aligned_storage` and the atomic model, and does not fold, so
+the dead `delete_deep` branch is explored with a symbolic count. That is a
+completeness cost, not a wrong verdict. `--smt-symex-guard`, which asks the
+solver about each guard, prunes it: a bare `immer::map<int, int> m;` then
+verifies in 4 s, and master reports a false FAILED on it, because the freed
+empty node is really deleted there. The unfolded value is the node's `values`
+pointer, stored as `nullptr` through placement new into the static buffer and
+read back as bytes; the same shape written in C folds away completely.
+
+WI-4 itself is still over its gate: with R64 and `--smt-symex-guard`,
+`renaming::level1t l1;` spent more than 20 minutes in symex without unwinding a
+loop, and the only diagnostic is that immer's `uninitialized_copy`
+(`immer/detail/util.hpp:161`) is treated as an allocating `new`, since its
+placement-new address has side effects. That is the next item for WI-4.
+
+---
+
 ## Appendix A — Methodological basis
 
 - **Design by contract.** Every harness is precondition (`__ESBMC_assume`) →
@@ -7009,6 +9069,29 @@ build/src/esbmc/esbmc probe.cpp -Wc,-include,shim.h \
 ```
 
 Read §13.5 before using a shim for anything other than measurement.
+
+**Three corrections, learned by re-running this in 2026-09 (§15 M9
+(self-verification re-measure)).**
+
+1. **Use `--std c++23`, not `c++20`.** `std::unreachable` is a C++23 name and
+   the model gates it correctly; at c++20 the probe reports a closed item.
+2. **No shim is needed any more**, and `-Ibuild/_deps/immer-src` only exists
+   where `immer` was fetched rather than found — point `-I` at the tree the
+   build actually used (`/opt/homebrew/include` on macOS). A missing `-I` shows
+   up as `'immer/map.hpp' file not found`, which reads like a model gap and is
+   not one.
+3. **`--parse-tree-only` answers only half the question.** It stops before
+   conversion, so it kept reporting progress after the blocker had moved
+   downstream. Run the probe *without* it as well, and grep the second run for
+   `Assertion failed`/`CONVERSION ERROR` — and grep the parse run's stderr for
+   `PARSING ERROR`, not for `error:`, since the AST dump itself contains lines
+   matching `error:` (every `logic_error`/`runtime_error` declaration) and a
+   naive grep scores a clean parse as a failure.
+
+**Where the blocker is, header by header.** Bisect by compiling
+`#include <X>` with an empty `main` for each header on the include path;
+that isolates conversion of a header's declarations. It does *not* show the
+class can be driven — for that, call it and mutate the assertion.
 
 **Tractability scaling (§13.3).**
 
