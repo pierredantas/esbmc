@@ -1196,13 +1196,16 @@ static const UserFBDef *fb_output_source(
     std::string(ov.name()) != "outVariable" || wired_variable(ov).empty() ||
     std::string(src.name()) != "block")
     return nullptr;
+  // In/out pins sit in input_vars and may be read after the call.
+  auto has_pin = [&pin](const std::vector<FBVarDecl> &vars) {
+    return std::any_of(vars.begin(), vars.end(), [&](const FBVarDecl &v) {
+      return v.name == pin;
+    });
+  };
   for (const auto &def : ast.user_fb_defs)
     if (
       def.type_name == type &&
-      std::any_of(
-        def.output_vars.begin(),
-        def.output_vars.end(),
-        [&](const FBVarDecl &v) { return v.name == pin; }))
+      (has_pin(def.output_vars) || has_pin(def.input_vars)))
       return &def;
   return nullptr;
 }
