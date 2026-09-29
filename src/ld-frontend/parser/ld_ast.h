@@ -186,6 +186,8 @@ struct VarDecl
   // Writable from outside the program (program VAR_IN_OUT or VAR_EXTERNAL,
   // %M memory): sampled each scan unless --ld-closed-world.
   bool shared = false;
+  bool synthesized =
+    false; // invented by the graphical resolver (pins, power flow)
   // Initial value for numeric variables. Graphical LD wires FB presets from
   // <inVariable> literals rather than declared variables, so the synthesised
   // preset symbol carries the literal here.
