@@ -9,22 +9,20 @@
  *  implementation of the same program, both present in `goto_functions`
  *  after a combined invocation with --secondary-entry-point.
  *
- *  Symexes __ESBMC_main (the LD side, unmodified) and, separately,
+ *  Symexes __ESBMC_main (the LD side) and, separately,
  *  __ESBMC_secondary_main (the reference side, via a temporary function-body
  *  swap so the existing __ESBMC_main-only symex entry point can reach it)
- *  each for one scan, asserts every correlated variable's post-scan value
- *  agrees in one shared solver, and checks UNSAT. Returns the process exit
- *  code (0 on a clean run, regardless of UNSAT/SAT, matching --ts-check's
- *  own convention of reporting a result rather than erroring on one).
+ *  each for one scan, asserts the correlation file's equalities in one
+ *  shared solver, and checks whether any out or state variable can differ
+ *  afterwards. Returns the process exit code (0 on a clean run, regardless
+ *  of UNSAT/SAT, matching --ts-check's own convention).
  *
- *  Covers computed outputs only (§3 step 3 of the design doc), not free
- *  inputs (§3 step 2, not yet implemented): the two symex passes draw
- *  independent nondet values for a program's inputs (ESBMC's built-in
- *  side_effect2t nondet on the LD side vs. a nondet_bool()/nondet_int()
- *  call's return-value temporary on the MATIEC-C side), so a correlation
- *  file that lists an input variable is checking that variable against an
- *  unconstrained, unrelated free value on each side and will spuriously
- *  report SAT. List only variables the scan computes from its inputs.
+ *  Correlation entries are "[in|out|state] ld_var ref.field.path". The two
+ *  passes share no symbols: the reference's globals and nondets are
+ *  renamed, so an input or a pre-state is common to both sides only when an
+ *  in or state entry says so. State not listed starts at its initial value
+ *  on both sides. Assumes are not applied, and the LD side's own property
+ *  assertions are dropped.
  */
 int run_ld_tv_check(
   contextt &context,

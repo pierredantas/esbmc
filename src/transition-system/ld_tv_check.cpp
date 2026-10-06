@@ -42,56 +42,45 @@ std::shared_ptr<symex_target_equationt> symex_one_step(
   return std::dynamic_pointer_cast<symex_target_equationt>(target);
 }
 
-// Each symex_one_step call below runs its own goto_symext from a clean
-// level1t/level2t renaming state, independently starting its l1/l2/node
-// counters from 0 (confirmed: neither pass is multithreaded, so
-// level1.thread_id is 0 in both). get_symbol_name()'s fully-qualified SSA
-// name is a pure function of (thename, rlevel, l1, thread, node, l2); two
-// structurally similar programs (an LD scan vs. its reference translation)
-// readily produce the SAME such tuple in both passes for low-numbered,
-// per-frame temporaries (goto_symext::guard_identifier()'s own
-// "goto_symex::guard" at level1, l1=0, thread=0 is one, confirmed
-// unconditionally constructed this way by every symex run). Converting
-// both equations into one shared smt_convt (as this tool does, to assert
-// cross-equation equalities) would then silently alias the two passes'
-// unrelated guards/temporaries onto the same SMT constant, corrupting the
-// comparison without erroring. Fixed by retagging every level1/level2
-// symbol2t in eq_ref's SSA steps to a thread_num no level1/level2 symbol
-// in eq_ld can have (eq_ld's symex only ever runs at thread 0); level1/
-// level2's own get_symbol_name() branches include thread_num in the built
-// name (level1_global/level2_global do not, but those name truly shared
-// globals, e.g. pthread bookkeeping state, which this single-threaded tool
-// is not at risk of needing to keep the two passes' views of distinct).
+// Each symex_one_step call runs its own goto_symext from a clean renaming
+// state, so both passes produce the same SSA names for low-numbered temporaries
+// (goto_symex::guard?0!0&0#1, nondet$symex::nondet0, a global's first
+// version). One shared smt_convt would alias them silently. Every symbol of
+// eq_ref is therefore moved out of eq_ld's namespace: level1/level2 symbols by
+// thread_num (eq_ld only ever runs thread 0), global symbols, which carry no
+// thread in their name, by a name prefix. Correlation between the sides is
+// then only what the correlation file states.
 constexpr unsigned ref_pass_thread_tag = 1;
+const std::string ref_pass_prefix = "ref::";
 
-// Rebuilds `e`'s level1/level2 symbol2t nodes with thread_num retagged to
-// `tag`, leaving level0/level1_global/level2_global symbols untouched (see
-// the comment above this function). expr2tc nodes are hash-consed, so a
-// matched symbol2t is never mutated in place; the pattern mirrors
-// goto_symext::replace_nondet (symex_assign.cpp), which rebuilds and
-// reassigns the expr2tc& slot instead of mutating a shared node.
-void retag_thread_num(expr2tc &e, unsigned tag)
+// expr2tc nodes are hash-consed, so a symbol is rebuilt and the slot
+// reassigned, as goto_symext::replace_nondet (symex_assign.cpp) does.
+void retag_ref_symbols(expr2tc &e)
 {
   if (is_nil_expr(e))
     return;
   if (is_symbol2t(e))
   {
     const symbol2t &sym = to_symbol2t(e);
+    const bool global =
+      sym.rlevel == symbol2t::renaming_level::level1_global ||
+      sym.rlevel == symbol2t::renaming_level::level2_global;
     if (
-      sym.rlevel == symbol2t::renaming_level::level1 ||
-      sym.rlevel == symbol2t::renaming_level::level2)
-      e = symbol2tc(
-        sym.type,
-        sym.thename,
-        sym.rlevel,
-        sym.level1_num,
-        sym.level2_num,
-        tag,
-        sym.node_num);
+      !global && sym.rlevel != symbol2t::renaming_level::level1 &&
+      sym.rlevel != symbol2t::renaming_level::level2)
+      return;
+    e = symbol2tc(
+      sym.type,
+      global ? ref_pass_prefix + sym.thename.as_string()
+             : sym.thename.as_string(),
+      sym.rlevel,
+      sym.level1_num,
+      sym.level2_num,
+      global ? sym.thread_num : ref_pass_thread_tag,
+      sym.node_num);
     return;
   }
-  e.get()->Foreach_operand(
-    [tag](expr2tc &op) { retag_thread_num(op, tag); });
+  e.get()->Foreach_operand([](expr2tc &op) { retag_ref_symbols(op); });
 }
 
 // Unwraps member/dereference/typecast layers from `e`, matching §6 of
@@ -151,8 +140,10 @@ std::optional<field_patht> decompose_field_path(const expr2tc &e)
 // after a "@" (so the correlation file can write the short local name,
 // e.g. "d", and match the real symbol id "c:@F@ref_scan@d", without the
 // caller having to know or spell the enclosing function).
-bool thename_matches(const std::string &thename, const std::string &base_symbol)
+bool thename_matches(std::string thename, const std::string &base_symbol)
 {
+  if (thename.rfind(ref_pass_prefix, 0) == 0)
+    thename.erase(0, ref_pass_prefix.size());
   if (thename == base_symbol)
     return true;
   const std::string suffix = "@" + base_symbol;
@@ -173,10 +164,12 @@ expr2tc final_value_of(
   expr2tc last;
   for (const auto &step : eq.SSA_steps)
   {
-    if (!step.is_assignment() || !step.original_lhs)
-      continue;
-    auto path = decompose_field_path(step.original_lhs);
-    if (path && thename_matches(path->base_symbol, base_symbol))
+    // The renamed lhs names the whole struct even when the write went through
+    // a pointer (a MATIEC body's data__->Y), where original_lhs is only a
+    // dereference.
+    if (
+      step.is_assignment() && is_symbol2t(step.lhs) &&
+      thename_matches(to_symbol2t(step.lhs).thename.as_string(), base_symbol))
       last = step.lhs;
   }
   return last;
@@ -209,8 +202,89 @@ project_field_path(const expr2tc &root, const std::vector<irep_idt> &members)
   return cur;
 }
 
+bool mentions_nondet(const expr2tc &e)
+{
+  if (is_nil_expr(e))
+    return false;
+  if (is_symbol2t(e))
+    return to_symbol2t(e).thename.as_string().find("nondet") !=
+           std::string::npos;
+  bool found = false;
+  e->foreach_operand(
+    [&found](const expr2tc &op) { found = found || mentions_nondet(op); });
+  return found;
+}
+
+// The member at `members` inside a constant struct `rhs`, or nil when `rhs`
+// is not a literal of that shape.
+expr2tc rhs_field(const expr2tc &rhs, const std::vector<irep_idt> &members)
+{
+  expr2tc cur = rhs;
+  for (const irep_idt &name : members)
+  {
+    if (is_nil_expr(cur) || !is_constant_struct2t(cur))
+      return expr2tc();
+    const struct_type2t &st = to_struct_type(cur->type);
+    auto it = std::find(st.member_names.begin(), st.member_names.end(), name);
+    if (it == st.member_names.end())
+      return expr2tc();
+    cur = to_constant_struct2t(cur).datatype_members[it - st.member_names.begin()];
+  }
+  return cur;
+}
+
+// The value `base.members` takes at the first write that stores a nondet
+// into it: an input read, or the havoc a state entry plants. Constant
+// initialisers are skipped. Nil when no such write exists.
+expr2tc first_nondet_write(
+  const symex_target_equationt &eq,
+  const std::string &base,
+  const std::vector<irep_idt> &members)
+{
+  for (const auto &step : eq.SSA_steps)
+  {
+    if (!step.is_assignment() || !step.original_lhs)
+      continue;
+    auto path = decompose_field_path(step.original_lhs);
+    if (
+      !path || !thename_matches(path->base_symbol, base) ||
+      path->members != members || !mentions_nondet(rhs_field(step.rhs, members)))
+      continue;
+    return members.empty() ? step.lhs : project_field_path(step.lhs, members);
+  }
+  return expr2tc();
+}
+
+// Replaces the first assignment to `ld_var` in `main`, the LD side's
+// initialiser, with a nondet, so the scan starts from any value of it.
+bool havoc_initial_value(goto_functiont &main, const std::string &ld_var)
+{
+  for (auto &instr : main.body.instructions)
+  {
+    if (!instr.is_assign())
+      continue;
+    code_assign2t &assign = to_code_assign2t(instr.code);
+    if (
+      is_symbol2t(assign.target) &&
+      thename_matches(to_symbol2t(assign.target).thename.as_string(), ld_var))
+    {
+      assign.source = gen_nondet(assign.target->type);
+      return true;
+    }
+  }
+  return false;
+}
+
+enum class correlation_kindt
+{
+  out,   // post-scan values must agree
+  in,    // both sides read the same input value
+  state, // both sides start from the same arbitrary value, and agree after
+};
+
 struct correlation_entryt
 {
+  correlation_kindt kind = correlation_kindt::out;
   std::string ld_var;  // e.g. "ld::Light"
   std::string ref_var;  // the reference side's own top-level local, e.g. "d"
   std::vector<irep_idt> ref_path; // e.g. {"Light", "value"}
@@ -236,18 +310,36 @@ read_correlation_file(const std::string &path)
   {
     ++lineno;
     std::istringstream ls(line);
-    std::string ld_var, ref_spec;
-    if (!(ls >> ld_var))
-      continue; // blank line
-    if (ld_var[0] == '#')
+    std::vector<std::string> tokens;
+    for (std::string tok; ls >> tok;)
+      tokens.push_back(tok);
+    if (tokens.empty() || tokens[0][0] == '#')
       continue;
-    if (!(ls >> ref_spec))
+    correlation_kindt kind = correlation_kindt::out;
+    if (tokens.size() == 3)
+    {
+      if (tokens[0] == "in")
+        kind = correlation_kindt::in;
+      else if (tokens[0] == "state")
+        kind = correlation_kindt::state;
+      else if (tokens[0] != "out")
+      {
+        log_error(
+          "ld-tv-check: {}:{}: '{}' is not one of in, out, state",
+          path, lineno, tokens[0]);
+        return std::nullopt;
+      }
+      tokens.erase(tokens.begin());
+    }
+    if (tokens.size() != 2)
     {
       log_error(
-        "ld-tv-check: {}:{}: expected \"ld_var ref.field.path\"", path,
-        lineno);
+        "ld-tv-check: {}:{}: expected \"[in|out|state] ld_var ref.field.path\"",
+        path, lineno);
       return std::nullopt;
     }
+    const std::string &ld_var = tokens[0];
+    const std::string &ref_spec = tokens[1];
     std::vector<irep_idt> path_parts;
     std::string ref_var;
     std::istringstream ps(ref_spec);
@@ -267,7 +359,7 @@ read_correlation_file(const std::string &path)
         path, lineno, ref_spec);
       return std::nullopt;
     }
-    table.push_back({ld_var, ref_var, path_parts});
+    table.push_back({kind, ld_var, ref_var, path_parts});
   }
   return table;
 }
@@ -296,11 +388,43 @@ int run_ld_tv_check(
     return 1;
   }
 
-  // Pass 1: the LD side, as built. __ESBMC_main already calls
-  // ld::scan_loop; nothing to swap.
+  const std::string correlation_path = options.get_option("ld-tv-check");
+  auto table = read_correlation_file(correlation_path);
+  if (!table)
+    return 1;
+  const bool compares = std::any_of(
+    table->begin(), table->end(), [](const correlation_entryt &e) {
+      return e.kind != correlation_kindt::in;
+    });
+  if (!compares)
+  {
+    log_error(
+      "ld-tv-check: '{}' names no out or state variable to compare",
+      correlation_path);
+    return 1;
+  }
+
+  // Pass 1: the LD side. A state entry starts from an arbitrary value, so its
+  // initialiser becomes a nondet; the original body is restored afterwards.
+  goto_functiont ld_body_saved = ld_main->second;
+  for (const auto &entry : *table)
+  {
+    if (
+      entry.kind == correlation_kindt::state &&
+      !havoc_initial_value(ld_main->second, entry.ld_var))
+    {
+      ld_main->second = ld_body_saved;
+      log_error(
+        "ld-tv-check: '{}' is never initialised on the LD side, so it has no "
+        "initial value to leave arbitrary",
+        entry.ld_var);
+      return 1;
+    }
+  }
   auto eq_ld = symex_one_step(goto_functions, context, options);
   if (!eq_ld)
   {
+    ld_main->second = ld_body_saved;
     log_error("ld-tv-check: symex of the LD side produced no equation");
     return 1;
   }
@@ -310,7 +434,6 @@ int run_ld_tv_check(
   // reaches it, then restore the LD body before returning: a later caller
   // of goto_functions (unlikely in this strategy, but cheap to keep clean)
   // should see the program it was handed.
-  goto_functiont ld_body_saved = ld_main->second;
   ld_main->second.body = ref_main->second.body;
   auto eq_ref = symex_one_step(goto_functions, context, options);
   ld_main->second = ld_body_saved;
@@ -321,48 +444,58 @@ int run_ld_tv_check(
     return 1;
   }
 
-  // See retag_thread_num's own comment: disjoint the two equations'
-  // level1/level2 symbol namespaces before either reaches the shared
-  // solver, so same-named per-frame temporaries (symex's own
-  // "goto_symex::guard" among them) from the two independent symex runs
-  // are never aliased onto one SMT constant.
+  // Keep the two passes' symbols apart before either reaches the shared solver.
   for (auto &step : eq_ref->SSA_steps)
   {
-    retag_thread_num(step.guard, ref_pass_thread_tag);
-    retag_thread_num(step.lhs, ref_pass_thread_tag);
-    retag_thread_num(step.rhs, ref_pass_thread_tag);
-    retag_thread_num(step.original_lhs, ref_pass_thread_tag);
-    retag_thread_num(step.original_rhs, ref_pass_thread_tag);
-    retag_thread_num(step.cond, ref_pass_thread_tag);
-    retag_thread_num(step.cond_neg, ref_pass_thread_tag);
-    retag_thread_num(step.cond_expr, ref_pass_thread_tag);
-  }
-
-  const std::string correlation_path = options.get_option("ld-tv-check");
-  auto table = read_correlation_file(correlation_path);
-  if (!table)
-    return 1;
-  if (table->empty())
-  {
-    log_error(
-      "ld-tv-check: '{}' names no variables to correlate", correlation_path);
-    return 1;
+    retag_ref_symbols(step.guard);
+    retag_ref_symbols(step.lhs);
+    retag_ref_symbols(step.rhs);
+    retag_ref_symbols(step.original_lhs);
+    retag_ref_symbols(step.original_rhs);
+    retag_ref_symbols(step.cond);
+    retag_ref_symbols(step.cond_neg);
+    retag_ref_symbols(step.cond_expr);
   }
 
   namespacet ns(context);
   optionst solver_opts = options;
   std::unique_ptr<smt_convt> solver(create_solver("", ns, solver_opts));
 
-  // Both equations' assignments/assumes become hard constraints (neither
-  // program carries its own __ESBMC_assert, so convert()'s own assertion
-  // encoding, whatever mode is passed, never fires; see
-  // ws1/tv_harness_design.md §3 step 1).
+  // Both equations' assignments and assumes become hard constraints. The LD
+  // side's own property assertions (from --ld-props) are dropped: converted
+  // in Violated mode they would negate a property that holds and make the
+  // whole query UNSAT, whatever the translation does.
+  for (auto *eq : {eq_ld.get(), eq_ref.get()})
+    for (auto &step : eq->SSA_steps)
+      if (step.is_assert())
+        step.ignore = true;
   eq_ld->convert(*solver, symex_target_equationt::assertion_modet::Violated);
   eq_ref->convert(*solver, symex_target_equationt::assertion_modet::Violated);
 
   std::vector<expr2tc> mismatches;
   for (const auto &entry : *table)
   {
+    if (entry.kind != correlation_kindt::out)
+    {
+      expr2tc ld_in = first_nondet_write(*eq_ld, entry.ld_var, {});
+      expr2tc ref_in =
+        first_nondet_write(*eq_ref, entry.ref_var, entry.ref_path);
+      if (!ld_in || !ref_in)
+      {
+        log_error(
+          "ld-tv-check: no nondet-fed write to {} found on the {} side; an "
+          "in or state entry needs the reference to assign a nondet to its "
+          "variable before the scan",
+          !ld_in ? entry.ld_var : entry.ref_var,
+          !ld_in ? "LD" : "reference");
+        return 1;
+      }
+      if (ld_in->type != ref_in->type)
+        ref_in = typecast2tc(ld_in->type, ref_in);
+      solver->assert_expr(equality2tc(ld_in, ref_in));
+      if (entry.kind == correlation_kindt::in)
+        continue;
+    }
     expr2tc ld_final = final_value_of(*eq_ld, entry.ld_var);
     if (!ld_final)
     {
@@ -417,6 +550,16 @@ int run_ld_tv_check(
     mismatches.push_back(not2tc(equality2tc(ld_final, ref_value)));
   }
 
+  // The query is only meaningful if the two equations and the correlation
+  // equalities admit some run: an inconsistent set would make every verdict
+  // UNSAT.
+  if (solver->dec_solve() != P_SATISFIABLE)
+  {
+    log_error(
+      "ld-tv-check: the two sides' constraints admit no run before any "
+      "comparison, so an UNSAT verdict would be vacuous");
+    return 1;
+  }
   solver->assert_expr(disjunction(mismatches));
 
   log_status(
@@ -425,10 +568,9 @@ int run_ld_tv_check(
   {
   case P_UNSATISFIABLE:
     log_result(
-      "LD-TV-CHECK UNSAT: every correlated variable agrees after one scan, "
-      "for every pre-state and every nondet choice each side's symex made "
-      "independently (see --help on --ld-tv-check: inputs are not yet "
-      "correlated across the two sides)");
+      "LD-TV-CHECK UNSAT: every out and state variable agrees after one "
+      "scan, for every value of the in and state variables; all other state "
+      "starts at its initial value on both sides");
     break;
   case P_SATISFIABLE:
     log_result(

@@ -1,2 +1,2 @@
-in ld::In1 d.in
+in ld::Out1 d.in
 out ld::Out1 d.out

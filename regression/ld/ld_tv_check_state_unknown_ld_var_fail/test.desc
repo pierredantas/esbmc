@@ -1,0 +1,4 @@
+CORE
+g_not.ld
+--ld-tv-check correlation.txt --secondary-entry-point --function ref_scan ref.c
+^ERROR: ld-tv-check: 'ld::Nope' is never initialised on the LD side, so it has no initial value to leave arbitrary$

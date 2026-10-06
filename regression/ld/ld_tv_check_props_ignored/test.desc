@@ -1,0 +1,4 @@
+CORE
+g_not.ld
+--ld-props props.yaml --ld-tv-check correlation.txt --secondary-entry-point --function ref_scan ref.c
+^LD-TV-CHECK UNSAT

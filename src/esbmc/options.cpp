@@ -562,14 +562,19 @@ const struct group_opt_templ all_cmd_options[] = {
      boost::program_options::value<std::string>()->value_name("file"),
      "With --secondary-entry-point and two input files (one LD, one the "
      "reference implementation), symex __ESBMC_main and "
-     "__ESBMC_secondary_main each one unwind, assert every variable named "
-     "in the given correlation file agrees after one step, and report "
-     "UNSAT/SAT instead of running the usual verification strategy. Each "
-     "line of the file is \"ld_var ref.field.path\" (whitespace-separated, "
-     "# comments, blank lines ignored); ref.field.path starts at the "
-     "reference's own top-level variable. List computed outputs only: an "
-     "input variable's nondet value is unconstrained and unrelated across "
-     "the two passes, so correlating one spuriously reports SAT"}}},
+     "__ESBMC_secondary_main each one unwind, assert the correlation "
+     "file's equalities, and report UNSAT/SAT on whether any out or state "
+     "variable can differ after one step, instead of running the usual "
+     "verification strategy. Each line of the file is \"[in|out|state] "
+     "ld_var ref.field.path\" (whitespace-separated, # comments, blank "
+     "lines ignored; no keyword means out); ref.field.path starts at the "
+     "reference's own top-level variable. in: both sides read the same "
+     "value, taken from the first write of a nondet to the variable on each "
+     "side. out: the post-scan values must agree. state: like out, and the "
+     "variable also starts from the same arbitrary value on both sides; the "
+     "reference must assign a nondet to it before the scan. State not "
+     "listed starts at its initial value on both sides. Assumes on either "
+     "side are not applied"}}},
   {"k-induction",
    {{"base-case", NULL, "Check the base case"},
     {"forward-condition", NULL, "Check the forward condition"},
