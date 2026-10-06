@@ -1,0 +1,4 @@
+CORE
+g_not.ld
+--ld-tv-check correlation.txt --secondary-entry-point --function ref_scan ref.c
+^ERROR: ld-tv-check: no nondet-fed write to d found on the reference side

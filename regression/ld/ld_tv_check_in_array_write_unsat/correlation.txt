@@ -1,0 +1,5 @@
+# a comment
+
+in ld::In1 d.in
+   # indented comment
+out ld::Out1 d.out

@@ -1,0 +1,2 @@
+in ld::In1 d.inner
+out ld::Out1 d.out

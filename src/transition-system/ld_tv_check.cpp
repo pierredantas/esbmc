@@ -530,12 +530,6 @@ bool symex_both_sides(
     }
   }
   eq_ld = symex_one_step(goto_functions, context, options);
-  if (!eq_ld)
-  {
-    ld_main->second = ld_body_saved;
-    log_error("ld-tv-check: symex of the LD side produced no equation");
-    return false;
-  }
 
   // Pass 2: swap the reference body into __ESBMC_main's slot so the same
   // (otherwise hardcoded, see execution_statet's constructor) entry point
@@ -545,12 +539,6 @@ bool symex_both_sides(
   ld_main->second.body = ref_main->second.body;
   eq_ref = symex_one_step(goto_functions, context, options);
   ld_main->second = ld_body_saved;
-
-  if (!eq_ref)
-  {
-    log_error("ld-tv-check: symex of the reference side produced no equation");
-    return false;
-  }
 
   // Keep the two passes' symbols apart before either reaches the shared solver.
   for (auto &step : eq_ref->SSA_steps)
