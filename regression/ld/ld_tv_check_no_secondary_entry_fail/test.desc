@@ -1,0 +1,4 @@
+CORE
+g_not.ld
+--ld-tv-check nonexistent.txt --function ref_scan
+^ERROR: --ld-tv-check needs --secondary-entry-point$

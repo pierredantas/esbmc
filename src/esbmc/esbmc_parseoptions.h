@@ -93,6 +93,8 @@ protected:
 
   int do_ts_strategy(optionst &options, goto_functionst &goto_functions);
 
+  int do_ld_tv_check(optionst &options, goto_functionst &goto_functions);
+
   int do_context_bound_deepening(
     optionst &options,
     goto_functionst &goto_functions);

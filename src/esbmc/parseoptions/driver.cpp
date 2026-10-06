@@ -318,6 +318,9 @@ int esbmc_parseoptionst::run_chosen_strategy(
   if (cmdline.isset("ts-check"))
     return do_ts_strategy(options, goto_functions);
 
+  if (cmdline.isset("ld-tv-check"))
+    return do_ld_tv_check(options, goto_functions);
+
   if (
     cmdline.isset("termination") || cmdline.isset("incremental-bmc") ||
     cmdline.isset("falsification") || cmdline.isset("k-induction") ||

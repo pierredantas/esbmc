@@ -63,6 +63,7 @@ add_library(esbmc-driver
     parseoptions/process_goto_program.cpp
     parseoptions/property_monitors.cpp
     parseoptions/ts_strategy.cpp
+    parseoptions/ld_tv_strategy.cpp
     bmc.cpp property_report.cpp ranking_synthesis.cpp non_termination.cpp show_vcc.cpp options.cpp)
 target_include_directories(esbmc-driver
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
@@ -73,6 +74,7 @@ target_link_libraries(esbmc-driver PUBLIC
                             ${LD_FRONTEND_TARGETS}
                             ${GOTO_CONTRACTOR_TARGETS} ${JIMPLE_FRONTEND_TARGETS}
                             clangcfrontend clangcppfrontend symex langapi transition-system-extraction
+                            ld-tv-check
                             solvers clibs gotoalgorithms cache ESBMC::boost goto2c ${OS_INCLUDE_LIBS}
                             nlohmann_json::nlohmann_json)
 

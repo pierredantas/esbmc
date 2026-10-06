@@ -557,6 +557,19 @@ const struct group_opt_templ all_cmd_options[] = {
      "Extract the main loop as a transition system, print one TS-CHECK line "
      "saying whether it is one, and stop"},
     {"ts-dump", NULL, "With --ts-check, also print the transition system"}}},
+  {"Translation validation (experimental)",
+   {{"ld-tv-check",
+     boost::program_options::value<std::string>()->value_name("file"),
+     "With --secondary-entry-point and two input files (one LD, one the "
+     "reference implementation), symex __ESBMC_main and "
+     "__ESBMC_secondary_main each one unwind, assert every variable named "
+     "in the given correlation file agrees after one step, and report "
+     "UNSAT/SAT instead of running the usual verification strategy. Each "
+     "line of the file is \"ld_var ref.field.path\" (whitespace-separated, "
+     "# comments, blank lines ignored); ref.field.path starts at the "
+     "reference's own top-level variable. List computed outputs only: an "
+     "input variable's nondet value is unconstrained and unrelated across "
+     "the two passes, so correlating one spuriously reports SAT"}}},
   {"k-induction",
    {{"base-case", NULL, "Check the base case"},
     {"forward-condition", NULL, "Check the forward condition"},
