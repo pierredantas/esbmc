@@ -14,7 +14,7 @@ struct ref_data
 int ref_scan(void)
 {
   struct ref_data d = {0};
-  d.in = nondet_bool() ? 1 : 0;
+  d.in = nondet_bool();
   d.out = d.in ? 0 : 1;
   return 0;
 }

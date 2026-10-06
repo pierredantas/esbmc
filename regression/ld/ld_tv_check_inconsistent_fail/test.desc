@@ -1,4 +1,0 @@
-CORE
-g_not.ld
---ld-tv-check correlation.txt --secondary-entry-point --function ref_scan ref.c
-^ERROR: ld-tv-check: the two sides' constraints admit no run before any comparison

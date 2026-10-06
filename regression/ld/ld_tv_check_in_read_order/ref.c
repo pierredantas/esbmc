@@ -1,5 +1,5 @@
-// ld_tv_check_in_unsat's reference with an unrelated nondet read first. The in entry
-// ties d.in to In1 by variable, not by read order.
+// ld_tv_check_in_unsat's reference with an unrelated nondet read first. The in
+// entry ties d.in to In1 by variable, not by read order.
 struct ref_data
 {
   _Bool in;

@@ -1,5 +1,5 @@
-// ld_tv_check_not_unsat's reference, correlated without an in entry: the two sides'
-// inputs are independent, so the outputs can differ.
+// ld_tv_check_not_unsat's reference, correlated without an in entry: the two
+// sides' inputs are independent, so the outputs can differ.
 struct ref_data
 {
   _Bool in;

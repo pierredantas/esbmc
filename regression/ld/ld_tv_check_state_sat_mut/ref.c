@@ -1,5 +1,6 @@
 // Latch with the hold dropped (q = in): equal to Latch from the initial state,
-// but not from a pre-state where q is already set, which the state entry reaches.
+// but not from a pre-state where q is already set, which the state entry
+// reaches.
 struct ref_data
 {
   _Bool in;

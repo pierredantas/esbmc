@@ -1,3 +1,3 @@
 in ld::In1 d.in
-in ld::In1 d.inv
+in ld::In2 d.in2
 out ld::Out1 d.out
