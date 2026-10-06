@@ -7,6 +7,7 @@
 #include <util/message/message.h>
 
 #include <algorithm>
+#include <cassert>
 #include <fstream>
 #include <optional>
 #include <set>
@@ -101,8 +102,7 @@ std::optional<field_patht> decompose_field_path(const expr2tc &e)
   expr2tc cur = e;
   while (true)
   {
-    if (!cur)
-      return std::nullopt;
+    assert(!is_nil_expr(cur));
     if (is_symbol2t(cur))
     {
       std::reverse(members.begin(), members.end());

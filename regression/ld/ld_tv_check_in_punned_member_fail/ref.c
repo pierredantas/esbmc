@@ -1,5 +1,12 @@
-struct ref_data { _Bool a; _Bool out; };
-struct other { _Bool zz; };
+struct ref_data
+{
+  _Bool a;
+  _Bool out;
+};
+struct other
+{
+  _Bool zz;
+};
 int ref_scan(void)
 {
   struct ref_data s = {0};

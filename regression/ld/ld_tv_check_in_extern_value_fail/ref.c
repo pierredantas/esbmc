@@ -1,4 +1,8 @@
-struct ref_data { _Bool in; _Bool out; };
+struct ref_data
+{
+  _Bool in;
+  _Bool out;
+};
 extern _Bool v;
 int ref_scan(void)
 {
