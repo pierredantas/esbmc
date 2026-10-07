@@ -1,0 +1,4 @@
+in ld::a d.a
+in ld::b d.b
+in ld::c d.c
+out ld::q d.q

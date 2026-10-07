@@ -390,7 +390,7 @@ bool align_scalar_types(const expr2tc &ld, expr2tc &ref)
   };
   if (!scalar(ld) || !scalar(ref))
     return false;
-  ref = typecast2tc(ld->type, ref);
+  ref = typecast2tc(ld->type, ref, gen_zero(get_int32_type()));
   return true;
 }
 // Asserts that both sides start the entry's variable from one nondet value.
@@ -502,6 +502,25 @@ int report_verdict(smt_convt &solver, size_t count)
 }
 // Symexes the LD side, then the reference, one scan each, into eq_ld and
 // eq_ref. Leaves goto_functions as it found it.
+// IEEE operations carry their rounding mode as an operand. Neither side changes
+// it from its initial value, round to nearest even, but it reaches the solver
+// as a free symbol, which is converted over every rounding mode and aborts the
+// Z3 backend on ROUND_TO_AWAY. It is replaced by that initial value on both
+// sides.
+void fix_rounding_mode(expr2tc &e)
+{
+  if (is_nil_expr(e))
+    return;
+  if (
+    is_symbol2t(e) &&
+    to_symbol2t(e).thename.as_string() == "c:@__ESBMC_rounding_mode")
+  {
+    e = gen_zero(e->type);
+    return;
+  }
+  e.get()->Foreach_operand([](expr2tc &op) { fix_rounding_mode(op); });
+}
+
 bool symex_both_sides(
   contextt &context,
   optionst &options,
@@ -552,6 +571,17 @@ bool symex_both_sides(
     retag_ref_symbols(step.cond_neg);
     retag_ref_symbols(step.cond_expr);
   }
+
+  for (auto *eq : {eq_ld.get(), eq_ref.get()})
+    for (auto &step : eq->SSA_steps)
+    {
+      fix_rounding_mode(step.guard);
+      fix_rounding_mode(step.rhs);
+      fix_rounding_mode(step.original_rhs);
+      fix_rounding_mode(step.cond);
+      fix_rounding_mode(step.cond_neg);
+      fix_rounding_mode(step.cond_expr);
+    }
 
   return true;
 }
