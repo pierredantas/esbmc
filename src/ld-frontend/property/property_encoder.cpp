@@ -1,9 +1,11 @@
 #include <ld-frontend/property/property_encoder.h>
+#include <ld-frontend/ld_cycle_time.h>
 #include <util/arith/arith_tools.h>
 #include <util/lang/c_types.h>
 #include <util/expr/expr_util.h>
 #include <util/symtab/symbol.h>
 #include <cctype>
+#include <limits>
 #include <stdexcept>
 
 property_encoder::property_encoder(
@@ -165,9 +167,19 @@ code_blockt property_encoder::encode_reachability(const LdProperty &p)
   return blk;
 }
 
-// response: auxiliary scan counter; assert trigger => response within max_scans
+// response: auxiliary counter of consecutive scans (max_scans) or of their
+// duration in milliseconds (max_ms), asserted not to pass the limit. The
+// duration of the scan on which the trigger is first seen counts in full, so
+// the monitor never under-counts the time since the trigger.
 code_blockt property_encoder::encode_response(const LdProperty &p)
 {
+  if (p.deadline_in_ms && !ld_cycle_time())
+    throw std::runtime_error(
+      "property '" + p.id + "': 'max_ms' needs --ld-cycle-time");
+  if (p.deadline_in_ms && p.max_ms >= std::numeric_limits<int>::max())
+    throw std::runtime_error(
+      "property '" + p.id + "': 'max_ms' does not fit a 32-bit counter");
+
   std::string ctr_name = "ld::__resp_ctr_" + p.id;
   if (!context_.find_symbol(ctr_name))
   {
@@ -189,15 +201,31 @@ code_blockt property_encoder::encode_response(const LdProperty &p)
   symbol_exprt ctr(ctr_name, int_type());
   symbol_exprt trigger = var_expr(p.trigger, p);
   symbol_exprt response = var_expr(p.response_var, p);
-  exprt limit = from_integer(BigInt(p.max_scans), int_type());
+  exprt limit =
+    from_integer(BigInt(p.deadline_in_ms ? p.max_ms : p.max_scans), int_type());
   exprt one = gen_one(int_type());
   exprt zero = gen_zero(int_type());
 
   // plus_exprt leaves its result type unset; set it explicitly (int_type)
   // since the LD frontend has no adjust pass to infer it, otherwise the node
   // migrates to a typeless add2t and trips an irep2 bit-width assertion.
+  exprt step = one;
+  if (p.deadline_in_ms)
+  {
+    const symbolt *delta = context_.find_symbol(kLdCycleDeltaId);
+    step =
+      typecast_exprt(symbol_exprt(delta->id, delta->get_type()), int_type());
+  }
   exprt incr(exprt::plus, int_type());
-  incr.copy_to_operands(ctr, one);
+  incr.copy_to_operands(ctr, step);
+  if (p.deadline_in_ms)
+  {
+    // Past max_ms the exact value is irrelevant; the cap keeps the state
+    // finite.
+    exprt cap(exprt::plus, int_type());
+    cap.copy_to_operands(limit, one);
+    incr = if_exprt(binary_relation_exprt(incr, ">", cap), cap, incr);
+  }
 
   code_ifthenelset ctr_step;
   ctr_step.cond() = and_exprt(trigger, not_exprt(response));

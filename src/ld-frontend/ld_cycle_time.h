@@ -7,6 +7,10 @@
 #include <stdexcept>
 #include <string>
 
+// Symbol the translator gives the per-scan duration; the response monitor reads
+// it.
+inline const std::string kLdCycleDeltaId = "ld::__cycle_delta";
+
 struct LdCycleTime
 {
   long long min_ms;

@@ -1,0 +1,4 @@
+CORE
+timer.ld
+--ld-props props.yaml --ld-cycle-time 10:30
+^ERROR: property 'P1': 'max_ms' does not fit a 32-bit counter$

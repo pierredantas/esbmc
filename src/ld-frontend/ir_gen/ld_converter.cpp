@@ -72,8 +72,6 @@ static std::string ld_name(const std::string &var)
   return "ld::" + var;
 }
 
-static const char *const kCycleDelta = "__cycle_delta";
-
 // plus_exprt/mult_exprt set no result type (the C frontend fills it in during
 // its adjust pass; the LD frontend builds final IR directly and has none), so
 // an untyped arith node migrates to a typeless add2t and trips the irep2
@@ -319,7 +317,7 @@ codet ld_converter::translate_timer(const LdIRNode &n)
   if (ld_cycle_time())
   {
     const typet wide = dint_type();
-    const symbol_exprt delta(ld_name(kCycleDelta), wide);
+    const symbol_exprt delta(kLdCycleDeltaId, wide);
     const exprt left = make_arith(
       exprt::minus, cast_to(pt_sym, wide), cast_to(et_sym, wide), wide);
     advance_by = cast_to(
@@ -727,8 +725,7 @@ code_blockt ld_converter::build_scan_body(const exprt &)
   // verifies vacuously.
   if (const auto cycle = ld_cycle_time())
   {
-    const symbol_exprt delta =
-      declare_scoped(ld_name(kCycleDelta), dint_type());
+    const symbol_exprt delta = declare_scoped(kLdCycleDeltaId, dint_type());
     scan_body.copy_to_operands(
       code_assignt(delta, side_effect_expr_nondett(delta.type())));
     scan_body.copy_to_operands(code_assumet(and_exprt(

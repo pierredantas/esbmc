@@ -2476,3 +2476,11 @@ regression/ld/ld_cycle_time_not_a_number_fail
 regression/ld/ld_cycle_time_range_ton_bounds
 regression/ld/ld_cycle_time_range_ton_early_fail
 regression/ld/ld_cycle_time_trailing_text_fail
+regression/ld/ld_response_both_limits_fail
+regression/ld/ld_response_ms_fail
+regression/ld/ld_response_ms_needs_timing_mode_fail
+regression/ld/ld_response_ms_safe
+regression/ld/ld_response_ms_too_large_fail
+regression/ld/ld_response_no_limit_fail
+regression/ld/ld_response_no_response_fail
+regression/ld/ld_response_no_trigger_fail
