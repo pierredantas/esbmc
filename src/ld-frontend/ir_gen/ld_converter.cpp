@@ -74,6 +74,8 @@ static std::string ld_name(const std::string &var)
 
 static const char *const kCycleDelta = "__cycle_delta";
 
+static codet invariant_assert(const FbInvariant &inv, const std::string &file);
+
 // plus_exprt/mult_exprt set no result type (the C frontend fills it in during
 // its adjust pass; the LD frontend builds final IR directly and has none), so
 // an untyped arith node migrates to a typeless add2t and trips the irep2
@@ -721,6 +723,12 @@ code_blockt ld_converter::build_scan_body(const exprt &)
 {
   code_blockt scan_body;
 
+  // The induction step starts from an arbitrary state, so the facts are
+  // assumed here and asserted at the end of the scan and before the loop.
+  const std::vector<FbInvariant> invariants = fb_invariants();
+  for (const FbInvariant &inv : invariants)
+    scan_body.copy_to_operands(code_assumet(inv.condition));
+
   // READ_INPUTS (SOS cyclic-scan model, §3.3): at the start of every scan
   // iteration each physical input is re-sampled nondeterministically.  Without
   // this the inputs stay frozen at their initial value and every property
@@ -813,7 +821,206 @@ code_blockt ld_converter::build_scan_body(const exprt &)
     scan_body.copy_to_operands(
       code_assignt(shadow, bool_value_of(var_expr(name))));
 
+  for (const FbInvariant &inv : invariants)
+    scan_body.copy_to_operands(invariant_assert(inv, ir_.source_file));
+
   return scan_body;
+}
+
+static exprt compare(const exprt &a, const char *rel, const exprt &b)
+{
+  const typet t = common_int_type(a.type(), b.type());
+  return binary_relation_exprt(cast_to(a, t), rel, cast_to(b, t));
+}
+
+static exprt equals(const exprt &a, const exprt &b)
+{
+  const typet t = common_int_type(a.type(), b.type());
+  return equality_exprt(cast_to(a, t), cast_to(b, t));
+}
+
+static exprt implies(const exprt &a, const exprt &b)
+{
+  return or_exprt(not_exprt(a), b);
+}
+
+// How many nodes write each variable. A pin that something besides its own
+// function block writes is not covered by the facts below.
+static std::map<std::string, int> count_writers(const LdIR &ir)
+{
+  std::map<std::string, int> writers;
+  for (const auto &rung : ir.rungs)
+    for (const auto &n : rung.nodes)
+      switch (n.kind)
+      {
+      case LdIRNodeKind::CoilAssign:
+        ++writers[n.variable];
+        break;
+      case LdIRNodeKind::ArithStep:
+        ++writers[n.arith_OUT];
+        break;
+      case LdIRNodeKind::TimerStep:
+        ++writers[n.timer_ET];
+        ++writers[n.timer_Q];
+        break;
+      case LdIRNodeKind::CounterStep:
+        ++writers[n.ctr_CV];
+        ++writers[n.ctr_Q];
+        break;
+      case LdIRNodeKind::ContactEval:
+        break;
+      }
+  for (const auto &ex : ir.user_fbs)
+    for (const auto &wire : ex.out_wires)
+      ++writers[wire.prog_var];
+  return writers;
+}
+
+// A preset no scan can change: not an input, not written from outside under
+// the open-world default, and not assigned by any node.
+bool ld_converter::preset_is_constant(
+  const std::string &name,
+  const std::map<std::string, int> &writers) const
+{
+  const bool closed_world = config.options.get_bool_option("ld-closed-world");
+  return writers.count(name) == 0 &&
+         std::none_of(
+           ir_.variables.begin(), ir_.variables.end(), [&](const VarDecl &v) {
+             return v.name == name &&
+                    (v.is_input || (v.shared && !closed_world));
+           });
+}
+
+long long ld_converter::initial_value(const std::string &name) const
+{
+  const auto it = std::find_if(
+    ir_.variables.begin(), ir_.variables.end(), [&](const VarDecl &v) {
+      return v.name == name;
+    });
+  return it == ir_.variables.end() ? 0 : it->init_value;
+}
+
+// End-of-scan facts, in terms of the previous-input shadow so a later write to
+// IN does not matter. A bound is relative to the declared initial value, which
+// need not be 0, and a fact that holds only after the first scan is emitted
+// only when ET and Q start at their defaults. Facts that mention PT hold for a
+// preset PT >= 0 that no scan changes.
+std::vector<exprt>
+ld_converter::timer_facts(const LdIRNode &n, bool preset_const)
+{
+  const symbol_exprt et = var_expr(n.timer_ET);
+  const symbol_exprt pt = var_expr(n.timer_PT);
+  const exprt q = bool_value_of(var_expr(n.timer_Q));
+  const symbol_exprt prev = declare_bool_shadow(
+    ld_name("__timer_prev_" + shadow_key(n.timer_instance, n.timer_Q)));
+  const long long et0 = initial_value(n.timer_ET);
+  const bool q_starts_false = initial_value(n.timer_Q) == 0;
+  const exprt zero = gen_zero(et.type());
+  const exprt pt_ok = compare(pt, ">=", gen_zero(pt.type()));
+  const exprt et_zero = equals(et, zero);
+
+  std::vector<exprt> facts{
+    compare(et, ">=", int_const(std::min(0LL, et0), et.type()))};
+  if (n.timer_kind == FBKind::TON && et0 == 0 && q_starts_false)
+    facts.push_back(implies(not_exprt(prev), and_exprt(et_zero, not_exprt(q))));
+  if (n.timer_kind == FBKind::TOF)
+    facts.push_back(implies(prev, and_exprt(et_zero, q)));
+  if (!preset_const)
+    return facts;
+
+  facts.push_back(implies(
+    pt_ok,
+    or_exprt(
+      compare(et, "<=", pt), compare(et, "<=", int_const(et0, et.type())))));
+  if (!q_starts_false)
+    return facts;
+  if (n.timer_kind == FBKind::TON)
+    facts.push_back(implies(and_exprt(pt_ok, q), compare(et, ">=", pt)));
+  else
+    facts.push_back(
+      implies(and_exprt(pt_ok, q), or_exprt(compare(et, "<", pt), et_zero)));
+  return facts;
+}
+
+std::vector<exprt>
+ld_converter::counter_facts(const LdIRNode &n, bool preset_const)
+{
+  const symbol_exprt cv = var_expr(n.ctr_CV);
+  const exprt q = bool_value_of(var_expr(n.ctr_Q));
+  const exprt zero = gen_zero(cv.type());
+  const long long cv0 = initial_value(n.ctr_CV);
+  const bool q_starts_false = initial_value(n.ctr_Q) == 0;
+  const bool up = n.ctr_kind == FBKind::CTU;
+  const exprt floor_cv =
+    compare(cv, ">=", int_const(std::min(0LL, cv0), cv.type()));
+
+  // A CTU only counts up from its initial value and a CTD loads PV, which the
+  // PV >= 0 guard below covers; a CTD's Q is true exactly when CV <= 0 once it
+  // has been evaluated.
+  std::vector<exprt> facts;
+  if (up)
+    facts.push_back(floor_cv);
+  else if (q_starts_false)
+    facts.push_back(implies(q, compare(cv, "<=", zero)));
+  if (!preset_const)
+    return facts;
+
+  const exprt pv = n.ctr_PV.empty() ? zero : exprt(var_expr(n.ctr_PV));
+  const exprt pv_ok = compare(pv, ">=", gen_zero(pv.type()));
+  if (up && q_starts_false)
+    facts.push_back(implies(q, compare(cv, ">=", pv)));
+  if (!up)
+    facts.push_back(implies(pv_ok, floor_cv));
+  facts.push_back(implies(
+    pv_ok,
+    or_exprt(
+      compare(cv, "<=", pv), compare(cv, "<=", int_const(cv0, cv.type())))));
+  return facts;
+}
+
+// The facts hold before the first scan as well (Q starts false, shadows false,
+// ET and CV at their declared value), which is why a counter's Q is related to
+// CV in one direction only: the other holds from the second scan.
+std::vector<FbInvariant> ld_converter::fb_invariants()
+{
+  std::vector<FbInvariant> result;
+  if (!config.options.get_bool_option("ld-fb-invariants"))
+    return result;
+
+  const auto writers = count_writers(ir_);
+  for (const auto &rung : ir_.rungs)
+    for (const auto &n : rung.nodes)
+    {
+      const bool timer = n.kind == LdIRNodeKind::TimerStep;
+      if (!timer && n.kind != LdIRNodeKind::CounterStep)
+        continue;
+      const std::string &out1 = timer ? n.timer_ET : n.ctr_CV;
+      const std::string &out2 = timer ? n.timer_Q : n.ctr_Q;
+      if (writers.at(out1) != 1 || writers.at(out2) != 1)
+        continue;
+      const std::string &preset = timer ? n.timer_PT : n.ctr_PV;
+      const bool constant = preset_is_constant(preset, writers);
+      exprt all = true_exprt();
+      for (const exprt &f :
+           timer ? timer_facts(n, constant) : counter_facts(n, constant))
+        all = and_exprt(all, f);
+      result.push_back(
+        {all,
+         "FB invariant of " + std::string(timer ? "timer " : "counter ") +
+           shadow_key(timer ? n.timer_instance : n.ctr_instance, out2)});
+    }
+  return result;
+}
+
+static codet invariant_assert(const FbInvariant &inv, const std::string &file)
+{
+  code_assertt a(inv.condition);
+  locationt loc;
+  loc.set_file(file);
+  loc.property("fb-invariant");
+  loc.comment(inv.description);
+  a.location() = loc;
+  return a;
 }
 
 // -----------------------------------------------------------------------
@@ -854,6 +1061,8 @@ void ld_converter::emit_scan_function(const code_blockt &scan_body)
       if (v.shared && !v.is_input)
         body.copy_to_operands(code_assignt(
           var_expr(v.name), side_effect_expr_nondett(var_expr(v.name).type())));
+  for (const FbInvariant &inv : fb_invariants())
+    body.copy_to_operands(invariant_assert(inv, ir_.source_file));
   body.copy_to_operands(loop);
   scan_sym.set_value(body);
   context_.move_symbol_to_context(scan_sym);

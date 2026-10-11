@@ -278,6 +278,11 @@ const struct group_opt_templ all_cmd_options[] = {
      "scan-watchdog "
      "assertion that fails once a loop exceeds --ld-scan-budget iterations, "
      "modelling a PLC scan overrun (changes the verified model)"},
+    {"ld-fb-invariants",
+     NULL,
+     "Assert, then assume, facts about every timer and counter at the end of "
+     "each scan (ET within PT, Q against ET or CV, CV within PV) so that "
+     "k-induction starts its step from reachable pin values"},
     {"ld-cycle-time",
      boost::program_options::value<std::string>()->value_name("MIN:MAX"),
      "Timing mode: every scan lasts between MIN and MAX milliseconds "

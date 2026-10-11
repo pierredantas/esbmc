@@ -7,12 +7,20 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <vector>
 
 // ld_converter translates LdIR into ESBMC's GOTO IR (irep2 / contextt).
 //
 // Pattern mirrors python_converter: the caller (ld_languaget::typecheck) passes
 // the context in; convert() adds all symbolt entries, the scan loop function,
 // and the loop-free __ESBMC_main that calls it.  No C file is produced.
+// One timer's or counter's end-of-scan facts, with the text of its assertion.
+struct FbInvariant
+{
+  exprt condition;
+  std::string description;
+};
+
 class ld_converter
 {
 public:
@@ -57,6 +65,13 @@ private:
   exprt bool_value_of(const symbol_exprt &var) const;
 
   code_blockt build_scan_body(const exprt &pf_in);
+  std::vector<FbInvariant> fb_invariants();
+  std::vector<exprt> timer_facts(const LdIRNode &n, bool preset_const);
+  std::vector<exprt> counter_facts(const LdIRNode &n, bool preset_const);
+  long long initial_value(const std::string &name) const;
+  bool preset_is_constant(
+    const std::string &name,
+    const std::map<std::string, int> &writers) const;
 
   codet translate_contact(const LdIRNode &n, const exprt &pf_in, exprt &pf_out);
   codet translate_coil(const LdIRNode &n, const exprt &pf);
