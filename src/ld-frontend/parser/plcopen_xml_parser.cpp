@@ -193,6 +193,25 @@ static void append_synthesized(
   synthesized.clear();
 }
 
+// A generated name is declared only so the resolver's own rungs type-check; a
+// program that names one would read the resolver's state, not a variable.
+static void reject_generated_references(
+  const pugi::xml_node &root,
+  const std::set<std::string> &generated)
+{
+  auto check = [&generated](const std::string &name) {
+    if (generated.count(name))
+      throw UnsupportedConstructError(
+        "reference to the generated name " + name, 2);
+  };
+  for (auto n : root.select_nodes("//contact | //coil"))
+    check(text_or_attr(n.node(), "variable", "variable"));
+  for (auto n : root.select_nodes(
+         "//inVariable/expression | //outVariable/expression | "
+         "//inOutVariable/expression | //block/variable"))
+    check(n.node().child_value());
+}
+
 static FBKind fb_kind_of(const std::string &s);
 static void check_known_pins(
   const pugi::xml_node &block,
@@ -1928,7 +1947,11 @@ LdAst PlcopenXmlParser::parse(const std::string &path)
   // Declare the pins and path accumulators the graphical resolver invented.
   // They are already marked as driven, so the inference below leaves them
   // alone rather than havocking them as physical inputs.
+  std::set<std::string> generated;
+  for (const auto &v : synth_vars_)
+    generated.insert(v.name);
   append_synthesized(ast.variables, synth_vars_);
+  reject_generated_references(root, generated);
 
   // -------------------------------------------------------------------
   // User-defined function-block bodies (e.g. EQ_0/GT_0/SUB_0 wrappers that

@@ -2626,3 +2626,4 @@ regression/ld/ld_timer_negative_preset_fail
 regression/ld/ld_tof_q_starts_true_fail
 regression/ld/ld_tof_q_written_by_coil_fail
 regression/ld/ld_ctu_cv_written_by_move_fail
+regression/ld/graphical_generated_name_reference_fail

@@ -1,0 +1,5 @@
+CORE
+pf.ld
+--ld-props props.yaml --unwind 2 --no-unwinding-assertions
+^ERROR: UnsupportedConstruct\(reference to the generated name pf2, tier=2\)$
+^ERROR: PARSING ERROR$
