@@ -30,6 +30,7 @@ private:
 
   void build_var_type_map(const LdAst &ast);
   void count_writers(const LdAst &ast);
+  int writes(const std::string &var) const;
   void check_rung_element(const RungElement &elem);
   void check_timer_fb(const TimerFBNode &fb);
   void check_counter_fb(const CounterFBNode &fb);
@@ -43,6 +44,12 @@ private:
     const std::string &b,
     const LdLocation &loc) const;
   void require_port(
+    const std::string &instance,
+    const char *port,
+    const std::string &var,
+    const LdLocation &loc) const;
+  void require_sole_writer(
+    const char *block,
     const std::string &instance,
     const char *port,
     const std::string &var,

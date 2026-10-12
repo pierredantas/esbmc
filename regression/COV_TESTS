@@ -2623,3 +2623,6 @@ regression/ld/ld_graphical_floating_contact_branch_safe
 regression/ld/ld_program_action_fail
 regression/ld/ld_reserved_monitor_name_fail
 regression/ld/ld_timer_negative_preset_fail
+regression/ld/ld_tof_q_starts_true_fail
+regression/ld/ld_tof_q_written_by_coil_fail
+regression/ld/ld_ctu_cv_written_by_move_fail

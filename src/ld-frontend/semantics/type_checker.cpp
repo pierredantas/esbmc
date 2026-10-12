@@ -51,6 +51,22 @@ void TypeChecker::require_port(
       loc_str(loc) + ": '" + instance + "' missing required port " + port);
 }
 
+// The converter keeps a block's state in the variables bound to ET, CV, and a
+// TOF's or TP's Q, where MATIEC keeps it inside the instance; the two agree
+// only while the block is the sole writer of each such variable.
+void TypeChecker::require_sole_writer(
+  const char *block,
+  const std::string &instance,
+  const char *port,
+  const std::string &var,
+  const LdLocation &loc) const
+{
+  if (inputs_.count(var) || shared_.count(var) || writes(var) > 1)
+    throw TypeCheckError(
+      loc_str(loc) + ": " + block + " '" + instance + "' " + port + " '" +
+      var + "' is written outside the block");
+}
+
 // INT is 16 bits; DINT and TIME (a tick count) are 32.
 static bool init_value_fits(const VarDecl &v)
 {
@@ -84,6 +100,12 @@ void TypeChecker::build_var_type_map(const LdAst &ast)
     if (v.shared)
       shared_.insert(v.name);
   }
+}
+
+int TypeChecker::writes(const std::string &var) const
+{
+  auto it = writers_.find(var);
+  return it == writers_.end() ? 0 : it->second;
 }
 
 void TypeChecker::count_writers(const LdAst &ast)
@@ -167,11 +189,23 @@ void TypeChecker::check_timer_fb(const TimerFBNode &fb)
   // The cycle-boundary refinement (and MATIEC agreement) holds only for a
   // preset that is fixed and non-negative.
   const bool pt_varies = inputs_.count(fb.PT_var) || shared_.count(fb.PT_var) ||
-                         writers_.count(fb.PT_var);
-  if (pt_varies || init_values_[fb.PT_var] < 0)
+                         writes(fb.PT_var) > 0;
+  if (pt_varies || init_values_.at(fb.PT_var) < 0)
     throw TypeCheckError(
       loc_str(fb.loc) + ": timer '" + fb.instance_name + "' PT '" + fb.PT_var +
       "' must be a non-negative constant");
+
+  require_sole_writer("timer", fb.instance_name, "ET", fb.ET_var, fb.loc);
+  // A TON recomputes Q and zeroes ET whenever IN is not held, but a TOF or TP
+  // carries both across idle scans, where MATIEC's starts at Q false, ET 0.
+  if (fb.kind != FBKind::TON)
+  {
+    require_sole_writer("timer", fb.instance_name, "Q", fb.Q_var, fb.loc);
+    if (init_values_.at(fb.Q_var) != 0 || init_values_.at(fb.ET_var) != 0)
+      throw TypeCheckError(
+        loc_str(fb.loc) + ": timer '" + fb.instance_name +
+        "' must start with Q false and ET zero");
+  }
 }
 
 void TypeChecker::check_counter_fb(const CounterFBNode &fb)
@@ -217,6 +251,8 @@ void TypeChecker::check_counter_fb(const CounterFBNode &fb)
       loc_str(fb.loc) + ": counter '" + fb.instance_name +
       "' CV port is narrower than PV");
   require_distinct(fb.instance_name, "PV and CV", fb.PV_var, fb.CV_var, fb.loc);
+
+  require_sole_writer("counter", fb.instance_name, "CV", fb.CV_var, fb.loc);
 }
 
 void TypeChecker::check_arith_fb(const ArithFBNode &fb)

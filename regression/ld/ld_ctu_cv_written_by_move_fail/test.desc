@@ -1,0 +1,5 @@
+CORE
+ctu.ld
+--ld-props props.yaml --unwind 3 --no-unwinding-assertions
+^ERROR: .*counter 'c1' CV 'cv' is written outside the block$
+^ERROR: PARSING ERROR$

@@ -1,0 +1,5 @@
+CORE
+tof.ld
+--ld-props props.yaml --unwind 3 --no-unwinding-assertions
+^ERROR: .*timer 't1' must start with Q false and ET zero$
+^ERROR: PARSING ERROR$
