@@ -1,0 +1,5 @@
+CORE
+ton.ld
+--ld-props props.yaml --unwind 2 --no-unwinding-assertions
+^ERROR: .*timer 't1' PT 'p' must be a non-negative constant$
+^ERROR: PARSING ERROR$

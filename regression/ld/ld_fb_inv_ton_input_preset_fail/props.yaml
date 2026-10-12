@@ -1,0 +1,5 @@
+properties:
+  - id: P1
+    kind: invariant
+    expression: "Q1 || !Q1"
+    description: "Never checked: a preset read from an input is refused"

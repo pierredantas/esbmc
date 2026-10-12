@@ -12,9 +12,11 @@
           <variable name="Up"><type><BOOL/></type></variable>
           <variable name="Dn"><type><BOOL/></type></variable>
           <variable name="Rst"><type><BOOL/></type></variable>
-          <variable name="PT"><type><INT/></type></variable>
           <variable name="PV"><type><INT/></type></variable>
         </inputVars>
+        <localVars>
+          <variable name="PT"><type><INT/></type><initialValue><simpleValue value="3"/></initialValue></variable>
+        </localVars>
         <outputVars>
           <variable name="Open"><type><BOOL/></type></variable>
           <variable name="TQ"><type><BOOL/></type></variable>

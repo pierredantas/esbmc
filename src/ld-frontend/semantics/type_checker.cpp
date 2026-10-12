@@ -78,9 +78,45 @@ void TypeChecker::build_var_type_map(const LdAst &ast)
          : v.kind == VarKind::DINT ? "DINT"
                                    : "TIME"));
     var_types_[v.name] = v.kind;
+    init_values_[v.name] = v.init_value;
     if (v.is_input)
       inputs_.insert(v.name);
+    if (v.shared)
+      shared_.insert(v.name);
   }
+}
+
+void TypeChecker::count_writers(const LdAst &ast)
+{
+  auto write = [this](const std::string &var) {
+    if (!var.empty())
+      ++writers_[var];
+  };
+  for (const auto &net : ast.networks)
+    for (const auto &rung : net.rungs)
+      for (const auto &elem : rung.elements)
+        switch (elem.kind)
+        {
+        case RungElementKind::Coil:
+          write(elem.coil.variable);
+          break;
+        case RungElementKind::TimerFB:
+          write(elem.timer_fb.Q_var);
+          write(elem.timer_fb.ET_var);
+          break;
+        case RungElementKind::CounterFB:
+          write(elem.counter_fb.Q_var);
+          write(elem.counter_fb.CV_var);
+          break;
+        case RungElementKind::ArithFB:
+          write(elem.arith_fb.OUT_var);
+          break;
+        case RungElementKind::Contact:
+          break;
+        }
+  for (const auto &inst : ast.user_fb_instances)
+    for (const auto &w : inst.out_wires)
+      write(w.prog_var);
 }
 
 // -----------------------------------------------------------------------
@@ -127,6 +163,15 @@ void TypeChecker::check_timer_fb(const TimerFBNode &fb)
 
   require_distinct(fb.instance_name, "IN and Q", fb.IN_var, fb.Q_var, fb.loc);
   require_distinct(fb.instance_name, "PT and ET", fb.PT_var, fb.ET_var, fb.loc);
+
+  // The cycle-boundary refinement (and MATIEC agreement) holds only for a
+  // preset that is fixed and non-negative.
+  const bool pt_varies = inputs_.count(fb.PT_var) || shared_.count(fb.PT_var) ||
+                         writers_.count(fb.PT_var);
+  if (pt_varies || init_values_[fb.PT_var] < 0)
+    throw TypeCheckError(
+      loc_str(fb.loc) + ": timer '" + fb.instance_name + "' PT '" + fb.PT_var +
+      "' must be a non-negative constant");
 }
 
 void TypeChecker::check_counter_fb(const CounterFBNode &fb)
@@ -239,6 +284,7 @@ void TypeChecker::check_rung_element(const RungElement &elem)
 void TypeChecker::check(const LdAst &ast)
 {
   build_var_type_map(ast);
+  count_writers(ast);
 
   // Second, independent guard on the vacuity of #7354: the parser's body
   // whitelist is keyed on notation, this catches an empty model however it

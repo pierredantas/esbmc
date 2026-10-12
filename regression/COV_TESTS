@@ -2602,7 +2602,7 @@ regression/ld/ld_fb_inv_negative_initial_et_safe
 regression/ld/ld_fb_inv_tof_et_within_pt_safe
 regression/ld/ld_fb_inv_ton_et_within_pt_safe
 regression/ld/ld_fb_inv_ton_et_within_pt_unknown
-regression/ld/ld_fb_inv_ton_input_preset_safe
+regression/ld/ld_fb_inv_ton_input_preset_fail
 regression/ld/ld_fb_inv_ton_ms_et_within_pt_safe
 regression/ld/ld_fb_inv_ton_ms_et_within_pt_unknown
 regression/ld/ld_fb_inv_ton_q_written_elsewhere_safe
@@ -2622,3 +2622,4 @@ regression/ld/ld_graphical_unmodeled_block_branch_fail
 regression/ld/ld_graphical_floating_contact_branch_safe
 regression/ld/ld_program_action_fail
 regression/ld/ld_reserved_monitor_name_fail
+regression/ld/ld_timer_negative_preset_fail
