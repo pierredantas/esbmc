@@ -1581,6 +1581,22 @@ reject_untranslated_bodies(const pugi::xml_node &root, const LdAst &ast)
   }
 }
 
+// An action runs only when something invokes it, but the scan loop would run
+// its network on every scan.
+static void reject_program_actions(const pugi::xml_node &root)
+{
+  const pugi::xpath_node first =
+    root.select_node("//pou[@pouType='program']/actions/action");
+  if (!first)
+    return;
+  const pugi::xml_node action = first.node();
+  throw UnsupportedConstructError(
+    "action '" + std::string(action.attribute("name").as_string()) +
+      "' of POU '" + action.parent().parent().attribute("name").as_string() +
+      "'",
+    2);
+}
+
 // -----------------------------------------------------------------------
 // Top-level parse()
 // -----------------------------------------------------------------------
@@ -1872,9 +1888,10 @@ LdAst PlcopenXmlParser::parse(const std::string &path)
   // <LD> network inside <pou><actions><action><body><LD>, not directly
   // under <pou><body>, when the LD logic is invoked from an SFC step
   // action rather than forming the POU's own top-level body. Both
-  // locations must be searched, or the action-nested rungs are silently
-  // skipped and the program verifies vacuously (no rung assignments,
-  // all variables at their zero-initialised default).
+  // locations are parsed so the wire checks see every network;
+  // reject_program_actions then refuses the program, since skipping the
+  // action rungs would verify it vacuously and running them every scan
+  // would verify a different program.
   for (auto xpath_node : root.select_nodes(
          "//pou[@pouType='program']/body/LD | "
          "//pou[@pouType='program']/actions/action/body/LD"))
@@ -2009,6 +2026,7 @@ LdAst PlcopenXmlParser::parse(const std::string &path)
   // Last, so the function-block definitions above are already registered.
   reject_untranslated_bodies(root, ast);
   reject_unmodelled_wires(root, ast);
+  reject_program_actions(root);
 
   return ast;
 }
