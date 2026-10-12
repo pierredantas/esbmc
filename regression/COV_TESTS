@@ -2618,3 +2618,5 @@ regression/ld/ld_response_ms_too_large_fail
 regression/ld/ld_response_no_limit_fail
 regression/ld/ld_response_no_response_fail
 regression/ld/ld_response_no_trigger_fail
+regression/ld/ld_graphical_unmodeled_block_branch_fail
+regression/ld/ld_graphical_floating_contact_branch_safe
