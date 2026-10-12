@@ -236,7 +236,8 @@ code_blockt property_encoder::encode_response(const LdProperty &p)
 
   code_blockt blk;
   blk.copy_to_operands(ctr_step);
-  if (p.deadline_in_ms && config.options.get_bool_option("ld-monitor-invariants"))
+  if (
+    p.deadline_in_ms && config.options.get_bool_option("ld-monitor-invariants"))
     for (const TimerSite &site : timers_)
       if (watches(p, site))
       {
@@ -280,7 +281,8 @@ void property_encoder::set_program(const std::vector<NetworkNode> &networks)
       aliases_[var] = alias;
 }
 
-property_encoder::Literal property_encoder::resolve(const std::string &var) const
+property_encoder::Literal
+property_encoder::resolve(const std::string &var) const
 {
   Literal lit{var, true, false, 0};
   for (int depth = 0; depth < 4; ++depth)
@@ -288,8 +290,8 @@ property_encoder::Literal property_encoder::resolve(const std::string &var) cons
     auto it = aliases_.find(lit.var);
     if (it == aliases_.end())
       break;
-    lit.first_rung = lit.aliased ? std::min(lit.first_rung, it->second.rung)
-                                 : it->second.rung;
+    lit.first_rung =
+      lit.aliased ? std::min(lit.first_rung, it->second.rung) : it->second.rung;
     lit.aliased = true;
     lit.var = it->second.source;
     lit.positive = lit.positive != it->second.negated;
@@ -352,7 +354,8 @@ exprt property_encoder::timer_monitor_fact(
   if (t.kind == FBKind::TP)
     live = q;
 
-  const exprt idle_zero = or_exprt(live, equality_exprt(ctr, gen_zero(int_type())));
+  const exprt idle_zero =
+    or_exprt(live, equality_exprt(ctr, gen_zero(int_type())));
   const exprt counted = binary_relation_exprt(ctr, "<=", plus(tmax, et));
   const exprt below_pt = or_exprt(
     binary_relation_exprt(pt, "<", one),
@@ -363,7 +366,8 @@ exprt property_encoder::timer_monitor_fact(
   // TON and TOF speak of the input the timer read (prev); for an input no rung
   // writes that is the value of IN at the end of the scan.
   const symbolt *shadow = context_.find_symbol(
-    "ld::__timer_prev_" + (t.instance_name.empty() ? t.Q_var : t.instance_name));
+    "ld::__timer_prev_" +
+    (t.instance_name.empty() ? t.Q_var : t.instance_name));
   if (t.kind != FBKind::TP && shadow)
     fact = and_exprt(
       equality_exprt(in, symbol_exprt(shadow->id, shadow->get_type())), fact);
