@@ -2621,3 +2621,4 @@ regression/ld/ld_response_no_trigger_fail
 regression/ld/ld_graphical_unmodeled_block_branch_fail
 regression/ld/ld_graphical_floating_contact_branch_safe
 regression/ld/ld_program_action_fail
+regression/ld/ld_reserved_monitor_name_fail
