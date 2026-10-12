@@ -33,6 +33,7 @@ private:
   int writes(const std::string &var) const;
   void check_rung_element(const RungElement &elem);
   void check_timer_fb(const TimerFBNode &fb);
+  void check_timer_state(const TimerFBNode &fb) const;
   void check_counter_fb(const CounterFBNode &fb);
   void check_arith_fb(const ArithFBNode &fb);
 

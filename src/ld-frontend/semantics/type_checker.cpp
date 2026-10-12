@@ -186,8 +186,13 @@ void TypeChecker::check_timer_fb(const TimerFBNode &fb)
   require_distinct(fb.instance_name, "IN and Q", fb.IN_var, fb.Q_var, fb.loc);
   require_distinct(fb.instance_name, "PT and ET", fb.PT_var, fb.ET_var, fb.loc);
 
-  // The cycle-boundary refinement (and MATIEC agreement) holds only for a
-  // preset that is fixed and non-negative.
+  check_timer_state(fb);
+}
+
+// Theorem 2 and agreement with MATIEC need a fixed, non-negative preset and a
+// timer state that only the block changes and that starts where MATIEC's does.
+void TypeChecker::check_timer_state(const TimerFBNode &fb) const
+{
   const bool pt_varies = inputs_.count(fb.PT_var) || shared_.count(fb.PT_var) ||
                          writes(fb.PT_var) > 0;
   if (pt_varies || init_values_.at(fb.PT_var) < 0)

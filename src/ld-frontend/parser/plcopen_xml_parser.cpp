@@ -174,12 +174,12 @@ static void require_total_order(const std::vector<int> &items, Less before)
 }
 
 // Appends the variables the resolver invented, refusing one that a declared
-// variable already uses.
-static void append_synthesized(
+// variable already uses, and returns their names.
+static std::set<std::string> append_synthesized(
   std::vector<VarDecl> &variables,
   std::vector<VarDecl> &synthesized)
 {
-  std::set<std::string> declared;
+  std::set<std::string> declared, generated;
   for (const auto &v : variables)
     declared.insert(v.name);
   for (auto &v : synthesized)
@@ -188,9 +188,11 @@ static void append_synthesized(
       throw UnsupportedConstructError(
         "variable " + v.name + " clashes with a name the resolver generates",
         2);
+    generated.insert(v.name);
     variables.push_back(std::move(v));
   }
   synthesized.clear();
+  return generated;
 }
 
 // A generated name is declared only so the resolver's own rungs type-check; a
@@ -470,6 +472,24 @@ struct GNode
 };
 
 static bool steps_every_scan(const std::string &type_name);
+
+// The power flow out of a timer or counter is its Q pin (pf_name), so a
+// power-flow wire from its ET or CV would be read as Q. An outVariable carries
+// data and has checks of its own, as does ENO; an empty formalParameter names
+// the Q of a one-output block.
+static void
+require_power_pin(const GNode &to, const GNode &from, const std::string &pin)
+{
+  if (to.tag == "outVariable" || to.tag == "inOutVariable")
+    return;
+  if (
+    steps_every_scan(from.type_name) && !pin.empty() && pin != "Q" &&
+    pin != "ENO")
+    throw UnsupportedConstructError(
+      from.type_name + " (" + from.instance_name + ") output " + pin +
+        " used as power flow",
+      2);
+}
 
 // A wire into a sink from an element the resolver does not model (a
 // continuation, a Boolean inVariable, a vendor element, a block whose output
@@ -947,19 +967,6 @@ static bool parse_graphical_ld(
   // power-flow connections become edges: a block's data pins (PT, PV) feed
   // values, not power, and must not create rung paths through the block.
   static const std::set<std::string> enable_pins = {"IN", "CU", "CD"};
-  // The power flow out of a timer or counter is its Q pin (pf_name), so a
-  // power-flow wire from its ET or CV would be read as Q. ENO has checks of
-  // its own, and an empty formalParameter names the Q of a one-output block.
-  auto require_q_pin = [&nodes](int src, const std::string &pin) {
-    const GNode &from = nodes.at(src);
-    if (
-      steps_every_scan(from.type_name) && !pin.empty() && pin != "Q" &&
-      pin != "ENO")
-      throw UnsupportedConstructError(
-        from.type_name + " (" + from.instance_name + ") output " + pin +
-          " used as power flow",
-        2);
-  };
   for (auto child : ld_body.children())
   {
     int lid = child.attribute("localId").as_int(-1);
@@ -971,23 +978,23 @@ static bool parse_graphical_ld(
       for (const auto &[formal, src] : nodes[lid].in_pins)
         if (enable_pins.count(formal) && nodes.count(src))
         {
-          require_q_pin(src, nodes[lid].in_pin_source[formal]);
+          require_power_pin(
+            nodes[lid], nodes.at(src), nodes[lid].in_pin_source[formal]);
           nodes[src].feeds.push_back(lid);
         }
       continue;
     }
 
-    // An outVariable carries data, not power; its wires are checked elsewhere.
-    const bool data_sink =
-      nodes[lid].tag == "outVariable" || nodes[lid].tag == "inOutVariable";
     for (auto conn_node : child.select_nodes(".//connection"))
     {
       auto conn = conn_node.node();
       int src = conn.attribute("refLocalId").as_int(-1);
       if (src < 0 || !nodes.count(src))
         continue;
-      if (!data_sink)
-        require_q_pin(src, conn.attribute("formalParameter").as_string());
+      require_power_pin(
+        nodes[lid],
+        nodes.at(src),
+        conn.attribute("formalParameter").as_string());
       nodes[src].feeds.push_back(lid);
     }
   }
@@ -1975,11 +1982,8 @@ LdAst PlcopenXmlParser::parse(const std::string &path)
   // Declare the pins and path accumulators the graphical resolver invented.
   // They are already marked as driven, so the inference below leaves them
   // alone rather than havocking them as physical inputs.
-  std::set<std::string> generated;
-  for (const auto &v : synth_vars_)
-    generated.insert(v.name);
-  append_synthesized(ast.variables, synth_vars_);
-  reject_generated_references(root, generated);
+  reject_generated_references(
+    root, append_synthesized(ast.variables, synth_vars_));
 
   // -------------------------------------------------------------------
   // User-defined function-block bodies (e.g. EQ_0/GT_0/SUB_0 wrappers that
