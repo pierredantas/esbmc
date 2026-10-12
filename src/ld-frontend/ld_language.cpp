@@ -96,6 +96,13 @@ bool ld_languaget::typecheck(contextt &context, const std::string & /*module*/)
     if (!props_.empty())
     {
       property_encoder encoder(context, ast_.source_file);
+      std::vector<TimerFBNode> timers;
+      for (const auto &net : ast_.networks)
+        for (const auto &rung : net.rungs)
+          for (const auto &elem : rung.elements)
+            if (elem.kind == RungElementKind::TimerFB)
+              timers.push_back(elem.timer_fb);
+      encoder.set_timers(std::move(timers));
       code_blockt prop_code = encoder.encode(props_);
 
       symbolt *scan_sym = context.find_symbol("ld::scan_loop");
@@ -116,6 +123,14 @@ bool ld_languaget::typecheck(contextt &context, const std::string & /*module*/)
           static_cast<code_whilet &>(static_cast<codet &>(*loop));
         for (const auto &op : prop_code.operands())
           whl.body().copy_to_operands(op);
+        for (const exprt &fact : encoder.monitor_facts())
+        {
+          code_assertt before(fact);
+          before.location().comment("monitor invariant before the first scan");
+          whl.body().operands().insert(
+            whl.body().operands().begin(), code_assumet(fact));
+          loop = scan_val.operands().insert(loop, before) + 1;
+        }
         scan_sym->set_value(scan_val);
       }
     }

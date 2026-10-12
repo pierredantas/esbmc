@@ -1,5 +1,6 @@
 #include <ld-frontend/property/property_encoder.h>
 #include <ld-frontend/ld_cycle_time.h>
+#include <util/config/config.h>
 #include <util/arith/arith_tools.h>
 #include <util/lang/c_types.h>
 #include <util/expr/expr_util.h>
@@ -234,8 +235,61 @@ code_blockt property_encoder::encode_response(const LdProperty &p)
 
   code_blockt blk;
   blk.copy_to_operands(ctr_step);
+  if (p.deadline_in_ms && config.options.get_bool_option("ld-monitor-invariants"))
+    for (const TimerFBNode &t : timers_)
+      if (
+        t.kind == FBKind::TON && t.IN_var == p.trigger &&
+        t.Q_var == p.response_var)
+      {
+        exprt fact = ton_monitor_fact(p, ctr, t);
+        blk.copy_to_operands(make_assert(fact, p));
+        monitor_facts_.push_back(fact);
+      }
   blk.copy_to_operands(make_assert(binary_relation_exprt(ctr, "<=", limit), p));
   return blk;
+}
+
+// While the trigger is the timer's IN and the response its Q, the monitor has
+// counted the first scan (at most Tmax) plus the timer's elapsed time, and the
+// timer has not reached its preset. With PT >= 1 that bounds the counter by
+// Tmax + PT - 1, whatever PT is.
+exprt property_encoder::ton_monitor_fact(
+  const LdProperty &p,
+  const symbol_exprt &ctr,
+  const TimerFBNode &t)
+{
+  auto as_int = [](const exprt &e) -> exprt {
+    return e.type() == int_type() ? e : exprt(typecast_exprt(e, int_type()));
+  };
+  auto plus = [](const exprt &a, const exprt &b) {
+    exprt sum(exprt::plus, int_type());
+    sum.copy_to_operands(a, b);
+    return sum;
+  };
+  const exprt et = as_int(var_expr(t.ET_var, p));
+  const exprt pt = as_int(var_expr(t.PT_var, p));
+  const exprt tmax = from_integer(BigInt(ld_cycle_time()->max_ms), int_type());
+  const exprt one = gen_one(int_type());
+  const exprt live = and_exprt(
+    var_expr(p.trigger, p), not_exprt(var_expr(p.response_var, p)));
+
+  const exprt idle_zero = or_exprt(live, equality_exprt(ctr, gen_zero(int_type())));
+  const exprt counted = binary_relation_exprt(ctr, "<=", plus(tmax, et));
+  const exprt below_pt = or_exprt(
+    binary_relation_exprt(pt, "<", one),
+    binary_relation_exprt(plus(et, one), "<=", pt));
+  // The timer's state speaks of the input it read (prev), the monitor of the
+  // trigger variable; for an input no rung writes they are the same value.
+  const symbolt *shadow = context_.find_symbol(
+    "ld::__timer_prev_" + (t.instance_name.empty() ? t.Q_var : t.instance_name));
+  const exprt linked = shadow ? exprt(equality_exprt(
+                                  var_expr(p.trigger, p),
+                                  symbol_exprt(shadow->id, shadow->get_type())))
+                              : exprt(true_exprt());
+  return and_exprt(
+    linked,
+    and_exprt(
+      idle_zero, or_exprt(not_exprt(live), and_exprt(counted, below_pt))));
 }
 
 code_blockt property_encoder::encode(const std::vector<LdProperty> &props)

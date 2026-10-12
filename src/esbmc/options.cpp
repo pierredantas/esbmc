@@ -278,6 +278,11 @@ const struct group_opt_templ all_cmd_options[] = {
      "scan-watchdog "
      "assertion that fails once a loop exceeds --ld-scan-budget iterations, "
      "modelling a PLC scan overrun (changes the verified model)"},
+    {"ld-monitor-invariants",
+     NULL,
+     "EXPERIMENT: relate a millisecond response monitor to the TON it "
+     "watches, so that k-induction proves the response bound without "
+     "unwinding as many scans as the timer needs (needs --ld-fb-invariants)"},
     {"ld-fb-invariants",
      NULL,
      "Assert, then assume, facts about every timer and counter at the end of "
