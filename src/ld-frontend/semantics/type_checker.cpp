@@ -63,8 +63,8 @@ void TypeChecker::require_sole_writer(
 {
   if (inputs_.count(var) || shared_.count(var) || writes(var) > 1)
     throw TypeCheckError(
-      loc_str(loc) + ": " + block + " '" + instance + "' " + port + " '" +
-      var + "' is written outside the block");
+      loc_str(loc) + ": " + block + " '" + instance + "' " + port + " '" + var +
+      "' is written outside the block");
 }
 
 // INT is 16 bits; DINT and TIME (a tick count) are 32.
