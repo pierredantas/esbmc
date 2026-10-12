@@ -1,0 +1,4 @@
+CORE
+latch.ld
+--ld-tv-check correlation.txt --secondary-entry-point --function ref_scan ref.c
+^LD-TV-CHECK SAT

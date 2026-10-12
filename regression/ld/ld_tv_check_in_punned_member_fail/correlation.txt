@@ -1,0 +1,2 @@
+in ld::In1 p.zz
+out ld::Out1 s.out

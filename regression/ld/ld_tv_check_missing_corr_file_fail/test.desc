@@ -1,0 +1,4 @@
+CORE
+g_not.ld
+--ld-tv-check does-not-exist.txt --secondary-entry-point --function ref_scan ref.c
+^ERROR: ld-tv-check: cannot open correlation file 'does-not-exist.txt'$

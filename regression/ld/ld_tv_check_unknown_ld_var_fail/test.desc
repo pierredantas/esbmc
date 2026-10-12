@@ -1,0 +1,4 @@
+CORE
+g_not.ld
+--ld-tv-check correlation.txt --secondary-entry-point --function ref_scan ref.c
+^ERROR: ld-tv-check: 'ld::NoSuchVar' is never written in the LD side's scan; check the correlation file and the LD program's variable names$

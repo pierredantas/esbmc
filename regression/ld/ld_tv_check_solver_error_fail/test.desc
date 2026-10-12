@@ -1,0 +1,4 @@
+CORE
+g_not.ld
+--ld-tv-check correlation.txt --secondary-entry-point --function ref_scan --smtlib --smtlib-solver-prog ./fake_solver.sh ref.c
+^ERROR: ld-tv-check: the solver returned an error

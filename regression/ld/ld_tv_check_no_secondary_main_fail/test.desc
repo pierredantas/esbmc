@@ -1,0 +1,4 @@
+CORE
+g_not.ld
+--ld-tv-check nonexistent.txt --secondary-entry-point
+^ERROR: --ld-tv-check needs both __ESBMC_main and __ESBMC_secondary_main; run with an LD file and a reference file together$
