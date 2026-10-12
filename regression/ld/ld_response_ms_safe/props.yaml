@@ -1,0 +1,7 @@
+properties:
+  - id: P1
+    kind: response
+    trigger: IN1
+    response: Q1
+    max_ms: 79
+    justification: "TON of 50 ms, scans of 10 to 30 ms: the first scan counts in full (30), then at most 49 more"

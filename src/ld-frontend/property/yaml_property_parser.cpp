@@ -16,6 +16,28 @@ PropertyKind YamlPropertyParser::kind_from_string(const std::string &s)
   throw LdPropertyParseError("Unknown property kind: '" + s + "'");
 }
 
+// A response property names a trigger, a response and exactly one limit:
+// max_scans (consecutive scans) or max_ms (milliseconds, with --ld-cycle-time).
+static void
+parse_response(const YAML::Node &node, LdProperty &p, const std::string &path)
+{
+  const std::string where = path + ": response property '" + p.id + "' ";
+  if (!node["trigger"])
+    throw LdPropertyParseError(where + "missing 'trigger'");
+  if (!node["response"])
+    throw LdPropertyParseError(where + "missing 'response'");
+  if (static_cast<bool>(node["max_scans"]) == static_cast<bool>(node["max_ms"]))
+    throw LdPropertyParseError(
+      where + "needs exactly one of 'max_scans' and 'max_ms'");
+  p.trigger = node["trigger"].as<std::string>();
+  p.response_var = node["response"].as<std::string>();
+  p.deadline_in_ms = static_cast<bool>(node["max_ms"]);
+  if (p.deadline_in_ms)
+    p.max_ms = node["max_ms"].as<unsigned>();
+  else
+    p.max_scans = node["max_scans"].as<unsigned>();
+}
+
 std::vector<LdProperty> YamlPropertyParser::parse(const std::string &path)
 {
   YAML::Node root;
@@ -88,18 +110,7 @@ std::vector<LdProperty> YamlPropertyParser::parse(const std::string &path)
       break;
 
     case PropertyKind::response:
-      if (!node["trigger"])
-        throw LdPropertyParseError(
-          path + ": response property '" + p.id + "' missing 'trigger'");
-      if (!node["response"])
-        throw LdPropertyParseError(
-          path + ": response property '" + p.id + "' missing 'response'");
-      if (!node["max_scans"])
-        throw LdPropertyParseError(
-          path + ": response property '" + p.id + "' missing 'max_scans'");
-      p.trigger = node["trigger"].as<std::string>();
-      p.response_var = node["response"].as<std::string>();
-      p.max_scans = node["max_scans"].as<unsigned>();
+      parse_response(node, p, path);
       break;
     }
 

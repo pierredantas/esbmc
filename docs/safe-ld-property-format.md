@@ -111,8 +111,14 @@ Asserts that a Boolean expression never holds (dual of `invariant`).
 
 ### `response`
 
-Asserts that whenever a `trigger` variable is `TRUE`, a `response` variable
-becomes `TRUE` within `max_scans` scan iterations.
+Asserts that the `trigger` variable is never `TRUE` with the `response` variable `FALSE` for more than
+`max_scans` consecutive scans. A trigger that drops before the response, or is true for fewer scans, never
+violates it, so this is a bound on a consecutive run and not "whenever the trigger holds, the response follows".
+
+With `--ld-cycle-time MIN:MAX` the limit can be a deadline in milliseconds, `max_ms`, in place of `max_scans`
+(exactly one of the two is required, and `max_ms` is an error without `--ld-cycle-time`). The monitor then adds
+the duration of each scan in the run, and the duration of the scan on which the trigger is first seen counts in
+full, so the monitor never counts less time than has passed since the trigger.
 
 ```yaml
 - id: P4
@@ -123,7 +129,17 @@ becomes `TRUE` within `max_scans` scan iterations.
   justification: "TON1_PT is 2 ticks; worst-case 3 scans + 2-scan margin"
 ```
 
-**GOTO IR emitted:** auxiliary scan counter + `code_assertt(ctr <= max_scans)`
+```yaml
+- id: P4b
+  kind: response
+  trigger: Start_Button
+  response: Conveyor_Running
+  max_ms: 79
+  justification: "TON of 50 ms, scans of 10 to 30 ms: 30 for the first scan plus at most 49"
+```
+
+**GOTO IR emitted:** auxiliary counter + `code_assertt(ctr <= max_scans)`; with `max_ms` the counter adds the scan
+duration, capped at `max_ms + 1`.
 
 **Guarantees:** Sound but **bounded**. The bound `max_scans` must be justified by
 timing analysis or IEC 61508 §7 requirements and documented in the `justification`

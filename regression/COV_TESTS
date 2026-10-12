@@ -2492,3 +2492,11 @@ regression/ld/ld_fb_inv_tp_et_within_pt_safe
 regression/ld/ld_fb_inv_user_fb_present_safe
 regression/ld/ld_fb_inv_initial_cv_above_preset_unknown
 regression/ld/ld_fb_inv_q_starts_true_safe
+regression/ld/ld_response_both_limits_fail
+regression/ld/ld_response_ms_fail
+regression/ld/ld_response_ms_needs_timing_mode_fail
+regression/ld/ld_response_ms_safe
+regression/ld/ld_response_ms_too_large_fail
+regression/ld/ld_response_no_limit_fail
+regression/ld/ld_response_no_response_fail
+regression/ld/ld_response_no_trigger_fail

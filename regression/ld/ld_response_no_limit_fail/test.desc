@@ -1,0 +1,4 @@
+CORE
+timer.ld
+--ld-props props.yaml
+needs exactly one of 'max_scans' and 'max_ms'

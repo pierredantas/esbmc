@@ -1,0 +1,4 @@
+CORE
+timer.ld
+--ld-props props.yaml
+^ERROR: property 'P1': 'max_ms' needs --ld-cycle-time$
