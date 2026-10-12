@@ -1,4 +1,5 @@
 #include <ld-frontend/ld_language.h>
+#include <ld-frontend/ld_cycle_time.h>
 #include <ld-frontend/parser/plcopen_xml_parser.h>
 #include <ld-frontend/semantics/type_checker.h>
 #include <ld-frontend/ir/ld_ir_builder.h>
@@ -24,6 +25,16 @@ bool ld_languaget::parse(const std::string &path)
   // from the --ld-props option unless one was already set explicitly.
   if (props_path_.empty())
     props_path_ = config.options.get_option("ld-props");
+
+  try
+  {
+    ld_cycle_time();
+  }
+  catch (const std::invalid_argument &e)
+  {
+    log_error("{}", e.what());
+    return true;
+  }
 
   try
   {
@@ -85,6 +96,7 @@ bool ld_languaget::typecheck(contextt &context, const std::string & /*module*/)
     if (!props_.empty())
     {
       property_encoder encoder(context, ast_.source_file);
+      encoder.set_program(ast_.networks);
       code_blockt prop_code = encoder.encode(props_);
 
       symbolt *scan_sym = context.find_symbol("ld::scan_loop");
@@ -105,6 +117,14 @@ bool ld_languaget::typecheck(contextt &context, const std::string & /*module*/)
           static_cast<code_whilet &>(static_cast<codet &>(*loop));
         for (const auto &op : prop_code.operands())
           whl.body().copy_to_operands(op);
+        for (const exprt &fact : encoder.monitor_facts())
+        {
+          code_assertt before(fact);
+          before.location().comment("monitor invariant before the first scan");
+          whl.body().operands().insert(
+            whl.body().operands().begin(), code_assumet(fact));
+          loop = scan_val.operands().insert(loop, before) + 1;
+        }
         scan_sym->set_value(scan_val);
       }
     }

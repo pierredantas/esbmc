@@ -110,6 +110,43 @@ esbmc loop.ld --ld-props props.yaml --ld-scan-watchdog --ld-scan-budget 8 \
   --k-induction --unlimited-k-steps --unwind 11
 ```
 
+## Timing mode
+
+By default a scan is one tick: a timer's `ET` grows by 1 per scan and a preset is a scan count. With
+`--ld-cycle-time=MIN:MAX` every scan lasts between `MIN` and `MAX` milliseconds (`1 <= MIN <= MAX`), chosen anew
+each scan and shared by all timers, and timer presets are milliseconds (`T#50ms`, or a plain integer). The
+elapsed time of a running timer is the sum of the scan lengths since the scan on which its input started the
+interval, which counts as no elapsed time, and it stops at the preset. Fold the clock resolution and any
+overrun allowance into `MAX`.
+
+```sh
+esbmc timer.ld --ld-props props.yaml --ld-cycle-time 10:30 --k-induction --unlimited-k-steps
+```
+
+With `MIN = MAX` equal to the task interval the verdicts match the default model. A wide range
+over-approximates the timing, so a property that holds only for one scan length can fail.
+
+## Function-block invariants
+
+k-induction starts its inductive step from an arbitrary state, including one no scan can reach, such as a timer with
+`ET` above `PT`. A property that depends on such a relation then never converges, whatever `k` is. With
+`--ld-fb-invariants` the translator adds, for every timer and counter, facts that hold in the initial state and after
+every scan: `ET` and `CV` stay between `0` (or their declared initial value) and the preset (or their declared initial
+value), a timer's `Q` agrees with its `ET`, and a counter's `Q` implies the comparison between `CV` and its preset. Each fact is assumed at the start of a scan, asserted at the end
+of it and asserted once before the first scan, so a fact that is false is reported as a violated property named
+`FB invariant of timer <name>` and never silently assumed.
+
+Facts that mention a preset are emitted only when no scan can change it: the preset is not an input, not a shared
+variable (unless `--ld-closed-world`), and not written by any rung or user function block. A timer or counter whose
+`ET`, `CV` or `Q` is written by anything else gets no facts.
+
+```sh
+esbmc timer.ld --ld-props props.yaml --k-induction --max-k-step 6 --ld-fb-invariants
+```
+
+Properties name Boolean variables, so the facts matter when a Boolean is derived from an integer relation, for
+example `Ok` from a `SUB` and a `CTU` as in `regression/ld/ld_fb_inv_ton_et_within_pt_safe`.
+
 ## Reading the result
 
 | ESBMC output | Strategy | Meaning |

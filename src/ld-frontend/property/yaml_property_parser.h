@@ -38,6 +38,8 @@ struct LdProperty
   std::string trigger;
   std::string response_var;
   unsigned max_scans = 0;
+  unsigned max_ms = 0; // deadline in milliseconds; needs --ld-cycle-time
+  bool deadline_in_ms = false;
 };
 
 class YamlPropertyParser

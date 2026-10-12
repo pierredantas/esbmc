@@ -1,9 +1,13 @@
 #include <ld-frontend/property/property_encoder.h>
+#include <ld-frontend/ld_cycle_time.h>
+#include <util/config/config.h>
 #include <util/arith/arith_tools.h>
 #include <util/lang/c_types.h>
 #include <util/expr/expr_util.h>
 #include <util/symtab/symbol.h>
+#include <algorithm>
 #include <cctype>
+#include <limits>
 #include <stdexcept>
 
 property_encoder::property_encoder(
@@ -165,9 +169,19 @@ code_blockt property_encoder::encode_reachability(const LdProperty &p)
   return blk;
 }
 
-// response: auxiliary scan counter; assert trigger => response within max_scans
+// response: auxiliary counter of consecutive scans (max_scans) or of their
+// duration in milliseconds (max_ms), asserted not to pass the limit. The
+// duration of the scan on which the trigger is first seen counts in full, so
+// the monitor never under-counts the time since the trigger.
 code_blockt property_encoder::encode_response(const LdProperty &p)
 {
+  if (p.deadline_in_ms && !ld_cycle_time())
+    throw std::runtime_error(
+      "property '" + p.id + "': 'max_ms' needs --ld-cycle-time");
+  if (p.deadline_in_ms && p.max_ms >= std::numeric_limits<int>::max())
+    throw std::runtime_error(
+      "property '" + p.id + "': 'max_ms' does not fit a 32-bit counter");
+
   std::string ctr_name = "ld::__resp_ctr_" + p.id;
   if (!context_.find_symbol(ctr_name))
   {
@@ -189,15 +203,31 @@ code_blockt property_encoder::encode_response(const LdProperty &p)
   symbol_exprt ctr(ctr_name, int_type());
   symbol_exprt trigger = var_expr(p.trigger, p);
   symbol_exprt response = var_expr(p.response_var, p);
-  exprt limit = from_integer(BigInt(p.max_scans), int_type());
+  exprt limit =
+    from_integer(BigInt(p.deadline_in_ms ? p.max_ms : p.max_scans), int_type());
   exprt one = gen_one(int_type());
   exprt zero = gen_zero(int_type());
 
   // plus_exprt leaves its result type unset; set it explicitly (int_type)
   // since the LD frontend has no adjust pass to infer it, otherwise the node
   // migrates to a typeless add2t and trips an irep2 bit-width assertion.
+  exprt step = one;
+  if (p.deadline_in_ms)
+  {
+    const symbolt *delta = context_.find_symbol(kLdCycleDeltaId);
+    step =
+      typecast_exprt(symbol_exprt(delta->id, delta->get_type()), int_type());
+  }
   exprt incr(exprt::plus, int_type());
-  incr.copy_to_operands(ctr, one);
+  incr.copy_to_operands(ctr, step);
+  if (p.deadline_in_ms)
+  {
+    // Past max_ms the exact value is irrelevant; the cap keeps the state
+    // finite.
+    exprt cap(exprt::plus, int_type());
+    cap.copy_to_operands(limit, one);
+    incr = if_exprt(binary_relation_exprt(incr, ">", cap), cap, incr);
+  }
 
   code_ifthenelset ctr_step;
   ctr_step.cond() = and_exprt(trigger, not_exprt(response));
@@ -206,8 +236,138 @@ code_blockt property_encoder::encode_response(const LdProperty &p)
 
   code_blockt blk;
   blk.copy_to_operands(ctr_step);
+  if (p.deadline_in_ms && config.options.get_bool_option("ld-monitor-invariants"))
+    for (const TimerSite &site : timers_)
+      if (watches(p, site))
+      {
+        exprt fact = timer_monitor_fact(p, ctr, site.timer);
+        blk.copy_to_operands(make_assert(fact, p));
+        monitor_facts_.push_back(fact);
+      }
   blk.copy_to_operands(make_assert(binary_relation_exprt(ctr, "<=", limit), p));
   return blk;
+}
+
+void property_encoder::set_program(const std::vector<NetworkNode> &networks)
+{
+  std::map<std::string, int> coil_writers;
+  std::map<std::string, Alias> candidates;
+  size_t index = 0;
+  for (const auto &net : networks)
+    for (const auto &rung : net.rungs)
+    {
+      for (const auto &el : rung.elements)
+      {
+        if (el.kind == RungElementKind::Coil)
+          ++coil_writers[el.coil.variable];
+        if (el.kind == RungElementKind::TimerFB)
+          timers_.push_back({el.timer_fb, index});
+      }
+      const auto &e = rung.elements;
+      if (
+        e.size() == 2 && e[0].kind == RungElementKind::Contact &&
+        e[1].kind == RungElementKind::Coil &&
+        e[1].coil.kind == CoilKind::Output &&
+        e[0].contact.edge == ContactEdge::None)
+        candidates[e[1].coil.variable] = {
+          e[0].contact.variable,
+          e[0].contact.kind == ContactKind::NormallyClosed,
+          index};
+      ++index;
+    }
+  for (const auto &[var, alias] : candidates)
+    if (coil_writers[var] == 1)
+      aliases_[var] = alias;
+}
+
+property_encoder::Literal property_encoder::resolve(const std::string &var) const
+{
+  Literal lit{var, true, false, 0};
+  for (int depth = 0; depth < 4; ++depth)
+  {
+    auto it = aliases_.find(lit.var);
+    if (it == aliases_.end())
+      break;
+    lit.first_rung = lit.aliased ? std::min(lit.first_rung, it->second.rung)
+                                 : it->second.rung;
+    lit.aliased = true;
+    lit.var = it->second.source;
+    lit.positive = lit.positive != it->second.negated;
+  }
+  return lit;
+}
+
+// The monitor's trigger and response, followed through alias rungs that run
+// after the timer, are the timer's IN and Q in the polarity the kind implies:
+// TON from IN rising until Q, TOF from IN falling until Q falls, TP while Q.
+bool property_encoder::watches(const LdProperty &p, const TimerSite &s) const
+{
+  const Literal t = resolve(p.trigger), r = resolve(p.response_var);
+  for (const Literal &lit : {t, r})
+    if (lit.aliased && lit.first_rung <= s.rung)
+      return false;
+  const TimerFBNode &n = s.timer;
+  auto is = [](const Literal &l, const std::string &v, bool positive) {
+    return l.var == v && l.positive == positive;
+  };
+  switch (n.kind)
+  {
+  case FBKind::TON:
+    return is(t, n.IN_var, true) && is(r, n.Q_var, true);
+  case FBKind::TOF:
+    return is(t, n.IN_var, false) && is(r, n.Q_var, false);
+  case FBKind::TP:
+    return is(t, n.Q_var, true) && is(r, n.Q_var, false);
+  default:
+    return false;
+  }
+}
+
+// While the monitor counts, it holds the first scan (at most Tmax) plus the
+// timer's elapsed time, and the timer has not reached its preset. With PT >= 1
+// that bounds the counter by Tmax + PT - 1, whatever PT is. The condition for
+// counting is stated in the timer's own variables, which the alias rungs copy.
+exprt property_encoder::timer_monitor_fact(
+  const LdProperty &p,
+  const symbol_exprt &ctr,
+  const TimerFBNode &t)
+{
+  auto as_int = [](const exprt &e) -> exprt {
+    return e.type() == int_type() ? e : exprt(typecast_exprt(e, int_type()));
+  };
+  auto plus = [](const exprt &a, const exprt &b) {
+    exprt sum(exprt::plus, int_type());
+    sum.copy_to_operands(a, b);
+    return sum;
+  };
+  const exprt et = as_int(var_expr(t.ET_var, p));
+  const exprt pt = as_int(var_expr(t.PT_var, p));
+  const exprt tmax = from_integer(BigInt(ld_cycle_time()->max_ms), int_type());
+  const exprt one = gen_one(int_type());
+  const symbol_exprt in = var_expr(t.IN_var, p), q = var_expr(t.Q_var, p);
+
+  exprt live = and_exprt(in, not_exprt(q));
+  if (t.kind == FBKind::TOF)
+    live = and_exprt(not_exprt(in), q);
+  if (t.kind == FBKind::TP)
+    live = q;
+
+  const exprt idle_zero = or_exprt(live, equality_exprt(ctr, gen_zero(int_type())));
+  const exprt counted = binary_relation_exprt(ctr, "<=", plus(tmax, et));
+  const exprt below_pt = or_exprt(
+    binary_relation_exprt(pt, "<", one),
+    binary_relation_exprt(plus(et, one), "<=", pt));
+  exprt fact = and_exprt(
+    idle_zero, or_exprt(not_exprt(live), and_exprt(counted, below_pt)));
+
+  // TON and TOF speak of the input the timer read (prev); for an input no rung
+  // writes that is the value of IN at the end of the scan.
+  const symbolt *shadow = context_.find_symbol(
+    "ld::__timer_prev_" + (t.instance_name.empty() ? t.Q_var : t.instance_name));
+  if (t.kind != FBKind::TP && shadow)
+    fact = and_exprt(
+      equality_exprt(in, symbol_exprt(shadow->id, shadow->get_type())), fact);
+  return fact;
 }
 
 code_blockt property_encoder::encode(const std::vector<LdProperty> &props)

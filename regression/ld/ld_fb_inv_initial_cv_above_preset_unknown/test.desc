@@ -1,0 +1,4 @@
+CORE
+counter.ld
+--ld-props props.yaml --incremental-bmc --overflow-check --ld-fb-invariants
+^VERIFICATION UNKNOWN$
