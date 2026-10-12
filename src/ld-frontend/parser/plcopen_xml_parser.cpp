@@ -1718,7 +1718,8 @@ static void reject_derived_operands(const LdAst &ast)
 }
 
 // The shadow of a timer or counter is named after its instance, or after its Q
-// variable when it has none; two blocks must not share one.
+// variable when it has none; two blocks must not share one. A timer and a
+// counter must not share one either: their generated pins (X__Q) would merge.
 static void reject_shared_shadow_keys(const LdAst &ast)
 {
   std::set<std::string> timers, counters;
@@ -1742,9 +1743,14 @@ static void reject_shared_shadow_keys(const LdAst &ast)
                   ? elem.counter_fb.Q_var
                   : elem.counter_fb.instance_name;
         }
-        if (seen && !seen->insert(key).second)
+        if (!seen)
+          continue;
+        if (!seen->insert(key).second)
           throw UnsupportedConstructError(
             "two blocks (key " + key + ") share one previous-input shadow", 2);
+        if (timers.count(key) && counters.count(key))
+          throw UnsupportedConstructError(
+            "a timer and a counter share the name " + key, 2);
       }
 }
 

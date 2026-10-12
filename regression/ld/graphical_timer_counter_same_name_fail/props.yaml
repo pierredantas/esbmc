@@ -1,0 +1,5 @@
+properties:
+  - id: P1
+    kind: invariant
+    expression: "tq || !tq"
+    description: "Never checked: the program is refused"
