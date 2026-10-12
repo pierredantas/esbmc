@@ -947,6 +947,19 @@ static bool parse_graphical_ld(
   // power-flow connections become edges: a block's data pins (PT, PV) feed
   // values, not power, and must not create rung paths through the block.
   static const std::set<std::string> enable_pins = {"IN", "CU", "CD"};
+  // The power flow out of a timer or counter is its Q pin (pf_name), so a
+  // power-flow wire from its ET or CV would be read as Q. ENO has checks of
+  // its own, and an empty formalParameter names the Q of a one-output block.
+  auto require_q_pin = [&nodes](int src, const std::string &pin) {
+    const GNode &from = nodes.at(src);
+    if (
+      steps_every_scan(from.type_name) && !pin.empty() && pin != "Q" &&
+      pin != "ENO")
+      throw UnsupportedConstructError(
+        from.type_name + " (" + from.instance_name + ") output " + pin +
+          " used as power flow",
+        2);
+  };
   for (auto child : ld_body.children())
   {
     int lid = child.attribute("localId").as_int(-1);
@@ -957,16 +970,25 @@ static bool parse_graphical_ld(
     {
       for (const auto &[formal, src] : nodes[lid].in_pins)
         if (enable_pins.count(formal) && nodes.count(src))
+        {
+          require_q_pin(src, nodes[lid].in_pin_source[formal]);
           nodes[src].feeds.push_back(lid);
+        }
       continue;
     }
 
+    // An outVariable carries data, not power; its wires are checked elsewhere.
+    const bool data_sink =
+      nodes[lid].tag == "outVariable" || nodes[lid].tag == "inOutVariable";
     for (auto conn_node : child.select_nodes(".//connection"))
     {
       auto conn = conn_node.node();
       int src = conn.attribute("refLocalId").as_int(-1);
-      if (src >= 0 && nodes.count(src))
-        nodes[src].feeds.push_back(lid);
+      if (src < 0 || !nodes.count(src))
+        continue;
+      if (!data_sink)
+        require_q_pin(src, conn.attribute("formalParameter").as_string());
+      nodes[src].feeds.push_back(lid);
     }
   }
 
