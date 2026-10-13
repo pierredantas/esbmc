@@ -2635,3 +2635,7 @@ regression/ld/graphical_generated_name_padded_fail
 regression/ld/graphical_userfb_in_from_timer_et_fail
 regression/ld/ld_closed_world_shared_preset_fail
 regression/ld/counter_initial_cv_fail
+regression/ld/graphical_dangling_connection_safe
+regression/ld/graphical_dangling_connection_fail
+regression/ld/ld_timer_preset_written_fail
+regression/ld/ld_tof_et_starts_nonzero_fail
