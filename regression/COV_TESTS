@@ -2608,7 +2608,7 @@ regression/ld/ld_fb_inv_ton_ms_et_within_pt_unknown
 regression/ld/ld_fb_inv_ton_q_written_elsewhere_safe
 regression/ld/ld_fb_inv_tp_et_within_pt_safe
 regression/ld/ld_fb_inv_user_fb_present_safe
-regression/ld/ld_fb_inv_initial_cv_above_preset_unknown
+regression/ld/ld_fb_inv_initial_cv_fail
 regression/ld/ld_fb_inv_q_starts_true_safe
 regression/ld/ld_response_both_limits_fail
 regression/ld/ld_response_ms_fail
@@ -2630,3 +2630,8 @@ regression/ld/graphical_generated_name_reference_fail
 regression/ld/graphical_timer_counter_same_name_fail
 regression/ld/graphical_timer_et_into_contact_fail
 regression/ld/graphical_timer_et_into_enable_fail
+regression/ld/graphical_setcoil_generated_name_fail
+regression/ld/graphical_generated_name_padded_fail
+regression/ld/graphical_userfb_in_from_timer_et_fail
+regression/ld/ld_closed_world_shared_preset_fail
+regression/ld/counter_initial_cv_fail

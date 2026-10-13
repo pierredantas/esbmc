@@ -195,6 +195,8 @@ static std::set<std::string> append_synthesized(
   return generated;
 }
 
+static std::string trim(const std::string &text);
+
 // A generated name is declared only so the resolver's own rungs type-check; a
 // program that names one would read the resolver's state, not a variable.
 static void reject_generated_references(
@@ -206,12 +208,13 @@ static void reject_generated_references(
       throw UnsupportedConstructError(
         "reference to the generated name " + name, 2);
   };
-  for (auto n : root.select_nodes("//contact | //coil"))
-    check(text_or_attr(n.node(), "variable", "variable"));
+  for (auto n :
+       root.select_nodes("//contact | //coil | //SetCoil | //ResetCoil"))
+    check(trim(text_or_attr(n.node(), "variable", "variable")));
   for (auto n : root.select_nodes(
          "//inVariable/expression | //outVariable/expression | "
          "//inOutVariable/expression | //block/variable"))
-    check(n.node().child_value());
+    check(trim(n.node().child_value()));
 }
 
 static FBKind fb_kind_of(const std::string &s);
@@ -474,13 +477,17 @@ struct GNode
 static bool steps_every_scan(const std::string &type_name);
 
 // The power flow out of a timer or counter is its Q pin (pf_name), so a
-// power-flow wire from its ET or CV would be read as Q. An outVariable carries
-// data and has checks of its own, as does ENO; an empty formalParameter names
-// the Q of a one-output block.
+// power-flow wire from its ET or CV would be read as Q. An outVariable, and a
+// user FB's input (an IN there is a data formal), carry data and have checks of
+// their own, as does ENO; an empty formalParameter names a one-output block's
+// Q.
 static void
 require_power_pin(const GNode &to, const GNode &from, const std::string &pin)
 {
-  if (to.tag == "outVariable" || to.tag == "inOutVariable")
+  const bool block = to.tag == "block" || to.tag == "Block";
+  if (
+    to.tag == "outVariable" || to.tag == "inOutVariable" ||
+    (block && !steps_every_scan(to.type_name)))
     return;
   if (
     steps_every_scan(from.type_name) && !pin.empty() && pin != "Q" &&
@@ -1747,8 +1754,8 @@ static void reject_derived_operands(const LdAst &ast)
 }
 
 // The shadow of a timer or counter is named after its instance, or after its Q
-// variable when it has none; two blocks must not share one. A timer and a
-// counter must not share one either: their generated pins (X__Q) would merge.
+// variable when it has none; two blocks must not share one. Nor may a timer and
+// a counter: in a graphical body their generated pins (X__Q) would merge.
 static void reject_shared_shadow_keys(const LdAst &ast)
 {
   std::set<std::string> timers, counters;

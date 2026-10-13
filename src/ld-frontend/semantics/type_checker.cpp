@@ -1,4 +1,5 @@
 #include <ld-frontend/semantics/type_checker.h>
+#include <util/config/config.h>
 #include <algorithm>
 #include <cstdint>
 #include <sstream>
@@ -84,6 +85,7 @@ static bool init_value_fits(const VarDecl &v)
 
 void TypeChecker::build_var_type_map(const LdAst &ast)
 {
+  const bool closed_world = config.options.get_bool_option("ld-closed-world");
   for (const auto &v : ast.variables)
   {
     if (!init_value_fits(v))
@@ -97,7 +99,9 @@ void TypeChecker::build_var_type_map(const LdAst &ast)
     init_values_[v.name] = v.init_value;
     if (v.is_input)
       inputs_.insert(v.name);
-    if (v.shared)
+    // Under --ld-closed-world the converter treats shared variables as written
+    // by this program only, so they are not external writers here either.
+    if (v.shared && !closed_world)
       shared_.insert(v.name);
   }
 }
@@ -189,8 +193,8 @@ void TypeChecker::check_timer_fb(const TimerFBNode &fb)
   check_timer_state(fb);
 }
 
-// Theorem 2 and agreement with MATIEC need a fixed, non-negative preset and a
-// timer state that only the block changes and that starts where MATIEC's does.
+// The model agrees with MATIEC's timer only for a fixed, non-negative preset
+// and a state that only the block changes and that starts where MATIEC's does.
 void TypeChecker::check_timer_state(const TimerFBNode &fb) const
 {
   const bool pt_varies = inputs_.count(fb.PT_var) || shared_.count(fb.PT_var) ||
@@ -258,6 +262,12 @@ void TypeChecker::check_counter_fb(const CounterFBNode &fb)
   require_distinct(fb.instance_name, "PV and CV", fb.PV_var, fb.CV_var, fb.loc);
 
   require_sole_writer("counter", fb.instance_name, "CV", fb.CV_var, fb.loc);
+  // MATIEC's instance starts at CV 0 and overwrites the bound variable on the
+  // first call, so a declared starting count would never be seen.
+  if (init_values_.at(fb.CV_var) != 0)
+    throw TypeCheckError(
+      loc_str(fb.loc) + ": counter '" + fb.instance_name +
+      "' must start with CV zero");
 }
 
 void TypeChecker::check_arith_fb(const ArithFBNode &fb)
