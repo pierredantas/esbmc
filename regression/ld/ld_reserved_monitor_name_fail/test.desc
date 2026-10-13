@@ -1,0 +1,5 @@
+CORE
+resp.ld
+--ld-props props.yaml --unwind 4 --no-unwinding-assertions
+^ERROR: .*variable __resp_ctr_r1 uses the reserved prefix __$
+^ERROR: PARSING ERROR$

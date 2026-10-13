@@ -1,0 +1,5 @@
+CORE
+timer.ld
+--ld-props props.yaml --unwind 2 --no-unwinding-assertions
+^ERROR: UnsupportedConstruct\(TON \(T1\) output ET used as power flow, tier=2\)$
+^ERROR: PARSING ERROR$

@@ -174,12 +174,12 @@ static void require_total_order(const std::vector<int> &items, Less before)
 }
 
 // Appends the variables the resolver invented, refusing one that a declared
-// variable already uses.
-static void append_synthesized(
+// variable already uses, and returns their names.
+static std::set<std::string> append_synthesized(
   std::vector<VarDecl> &variables,
   std::vector<VarDecl> &synthesized)
 {
-  std::set<std::string> declared;
+  std::set<std::string> declared, generated;
   for (const auto &v : variables)
     declared.insert(v.name);
   for (auto &v : synthesized)
@@ -188,9 +188,33 @@ static void append_synthesized(
       throw UnsupportedConstructError(
         "variable " + v.name + " clashes with a name the resolver generates",
         2);
+    generated.insert(v.name);
     variables.push_back(std::move(v));
   }
   synthesized.clear();
+  return generated;
+}
+
+static std::string trim(const std::string &text);
+
+// A generated name is declared only so the resolver's own rungs type-check; a
+// program that names one would read the resolver's state, not a variable.
+static void reject_generated_references(
+  const pugi::xml_node &root,
+  const std::set<std::string> &generated)
+{
+  auto check = [&generated](const std::string &name) {
+    if (generated.count(name))
+      throw UnsupportedConstructError(
+        "reference to the generated name " + name, 2);
+  };
+  for (auto n :
+       root.select_nodes("//contact | //coil | //SetCoil | //ResetCoil"))
+    check(trim(text_or_attr(n.node(), "variable", "variable")));
+  for (auto n : root.select_nodes(
+         "//inVariable/expression | //outVariable/expression | "
+         "//inOutVariable/expression | //block/variable"))
+    check(trim(n.node().child_value()));
 }
 
 static FBKind fb_kind_of(const std::string &s);
@@ -451,6 +475,28 @@ struct GNode
 };
 
 static bool steps_every_scan(const std::string &type_name);
+
+// The power flow out of a timer or counter is its Q pin (pf_name), so a
+// power-flow wire from its ET or CV would be read as Q. An outVariable, and a
+// user FB's input (an IN there is a data formal), carry data and have checks of
+// their own, as does ENO; an empty formalParameter names a one-output block's
+// Q.
+static void
+require_power_pin(const GNode &to, const GNode &from, const std::string &pin)
+{
+  const bool block = to.tag == "block" || to.tag == "Block";
+  if (
+    to.tag == "outVariable" || to.tag == "inOutVariable" ||
+    (block && !steps_every_scan(to.type_name)))
+    return;
+  if (
+    steps_every_scan(from.type_name) && !pin.empty() && pin != "Q" &&
+    pin != "ENO")
+    throw UnsupportedConstructError(
+      from.type_name + " (" + from.instance_name + ") output " + pin +
+        " used as power flow",
+      2);
+}
 
 // A wire into a sink from an element the resolver does not model (a
 // continuation, a Boolean inVariable, a vendor element, a block whose output
@@ -938,7 +984,11 @@ static bool parse_graphical_ld(
     {
       for (const auto &[formal, src] : nodes[lid].in_pins)
         if (enable_pins.count(formal) && nodes.count(src))
+        {
+          require_power_pin(
+            nodes[lid], nodes.at(src), nodes[lid].in_pin_source[formal]);
           nodes[src].feeds.push_back(lid);
+        }
       continue;
     }
 
@@ -946,8 +996,13 @@ static bool parse_graphical_ld(
     {
       auto conn = conn_node.node();
       int src = conn.attribute("refLocalId").as_int(-1);
-      if (src >= 0 && nodes.count(src))
-        nodes[src].feeds.push_back(lid);
+      if (src < 0 || !nodes.count(src))
+        continue;
+      require_power_pin(
+        nodes[lid],
+        nodes.at(src),
+        conn.attribute("formalParameter").as_string());
+      nodes[src].feeds.push_back(lid);
     }
   }
 
@@ -1581,6 +1636,22 @@ reject_untranslated_bodies(const pugi::xml_node &root, const LdAst &ast)
   }
 }
 
+// An action runs only when something invokes it, but the scan loop would run
+// its network on every scan.
+static void reject_program_actions(const pugi::xml_node &root)
+{
+  const pugi::xpath_node first =
+    root.select_node("//pou[@pouType='program']/actions/action");
+  if (!first)
+    return;
+  const pugi::xml_node action = first.node();
+  throw UnsupportedConstructError(
+    "action '" + std::string(action.attribute("name").as_string()) +
+      "' of POU '" + action.parent().parent().attribute("name").as_string() +
+      "'",
+    2);
+}
+
 // -----------------------------------------------------------------------
 // Top-level parse()
 // -----------------------------------------------------------------------
@@ -1683,7 +1754,8 @@ static void reject_derived_operands(const LdAst &ast)
 }
 
 // The shadow of a timer or counter is named after its instance, or after its Q
-// variable when it has none; two blocks must not share one.
+// variable when it has none; two blocks must not share one. Nor may a timer and
+// a counter: in a graphical body their generated pins (X__Q) would merge.
 static void reject_shared_shadow_keys(const LdAst &ast)
 {
   std::set<std::string> timers, counters;
@@ -1707,9 +1779,14 @@ static void reject_shared_shadow_keys(const LdAst &ast)
                   ? elem.counter_fb.Q_var
                   : elem.counter_fb.instance_name;
         }
-        if (seen && !seen->insert(key).second)
+        if (!seen)
+          continue;
+        if (!seen->insert(key).second)
           throw UnsupportedConstructError(
             "two blocks (key " + key + ") share one previous-input shadow", 2);
+        if (timers.count(key) && counters.count(key))
+          throw UnsupportedConstructError(
+            "a timer and a counter share the name " + key, 2);
       }
 }
 
@@ -1788,10 +1865,10 @@ static void reject_wired_enable_pins(const pugi::xml_node &root)
 
 static void check_declaration(std::set<std::string> &seen, const VarDecl &v)
 {
-  for (const char *prefix : {"__edge_prev_", "__timer_prev_", "__ctr_prev_"})
-    if (v.name.rfind(prefix, 0) == 0)
-      throw LdParseError(
-        "variable " + v.name + " uses the reserved prefix " + prefix);
+  // Every generated name (shadows, the response monitors' counters, the cycle
+  // delta) starts with "__", which no IEC identifier may contain.
+  if (v.name.rfind("__", 0) == 0)
+    throw LdParseError("variable " + v.name + " uses the reserved prefix __");
   if (!seen.insert(v.name).second)
     throw LdParseError("variable " + v.name + " is declared more than once");
 }
@@ -1872,9 +1949,10 @@ LdAst PlcopenXmlParser::parse(const std::string &path)
   // <LD> network inside <pou><actions><action><body><LD>, not directly
   // under <pou><body>, when the LD logic is invoked from an SFC step
   // action rather than forming the POU's own top-level body. Both
-  // locations must be searched, or the action-nested rungs are silently
-  // skipped and the program verifies vacuously (no rung assignments,
-  // all variables at their zero-initialised default).
+  // locations are parsed so the wire checks see every network;
+  // reject_program_actions then refuses the program, since skipping the
+  // action rungs would verify it vacuously and running them every scan
+  // would verify a different program.
   for (auto xpath_node : root.select_nodes(
          "//pou[@pouType='program']/body/LD | "
          "//pou[@pouType='program']/actions/action/body/LD"))
@@ -1911,7 +1989,8 @@ LdAst PlcopenXmlParser::parse(const std::string &path)
   // Declare the pins and path accumulators the graphical resolver invented.
   // They are already marked as driven, so the inference below leaves them
   // alone rather than havocking them as physical inputs.
-  append_synthesized(ast.variables, synth_vars_);
+  reject_generated_references(
+    root, append_synthesized(ast.variables, synth_vars_));
 
   // -------------------------------------------------------------------
   // User-defined function-block bodies (e.g. EQ_0/GT_0/SUB_0 wrappers that
@@ -2009,6 +2088,7 @@ LdAst PlcopenXmlParser::parse(const std::string &path)
   // Last, so the function-block definitions above are already registered.
   reject_untranslated_bodies(root, ast);
   reject_unmodelled_wires(root, ast);
+  reject_program_actions(root);
 
   return ast;
 }

@@ -1,0 +1,5 @@
+CORE
+blocks.ld
+--ld-props props.yaml --unwind 2 --no-unwinding-assertions
+^ERROR: UnsupportedConstruct\(a timer and a counter share the name X, tier=2\)$
+^ERROR: PARSING ERROR$

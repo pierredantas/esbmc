@@ -1,4 +1,5 @@
 #include <ld-frontend/semantics/type_checker.h>
+#include <util/config/config.h>
 #include <algorithm>
 #include <cstdint>
 #include <sstream>
@@ -51,6 +52,22 @@ void TypeChecker::require_port(
       loc_str(loc) + ": '" + instance + "' missing required port " + port);
 }
 
+// The converter keeps a block's state in the variables bound to ET, CV, and a
+// TOF's or TP's Q, where MATIEC keeps it inside the instance; the two agree
+// only while the block is the sole writer of each such variable.
+void TypeChecker::require_sole_writer(
+  const char *block,
+  const std::string &instance,
+  const char *port,
+  const std::string &var,
+  const LdLocation &loc) const
+{
+  if (inputs_.count(var) || shared_.count(var) || writes(var) > 1)
+    throw TypeCheckError(
+      loc_str(loc) + ": " + block + " '" + instance + "' " + port + " '" + var +
+      "' is written outside the block");
+}
+
 // INT is 16 bits; DINT and TIME (a tick count) are 32.
 static bool init_value_fits(const VarDecl &v)
 {
@@ -68,6 +85,7 @@ static bool init_value_fits(const VarDecl &v)
 
 void TypeChecker::build_var_type_map(const LdAst &ast)
 {
+  const bool closed_world = config.options.get_bool_option("ld-closed-world");
   for (const auto &v : ast.variables)
   {
     if (!init_value_fits(v))
@@ -78,9 +96,53 @@ void TypeChecker::build_var_type_map(const LdAst &ast)
          : v.kind == VarKind::DINT ? "DINT"
                                    : "TIME"));
     var_types_[v.name] = v.kind;
+    init_values_[v.name] = v.init_value;
     if (v.is_input)
       inputs_.insert(v.name);
+    // Under --ld-closed-world the converter treats shared variables as written
+    // by this program only, so they are not external writers here either.
+    if (v.shared && !closed_world)
+      shared_.insert(v.name);
   }
+}
+
+int TypeChecker::writes(const std::string &var) const
+{
+  auto it = writers_.find(var);
+  return it == writers_.end() ? 0 : it->second;
+}
+
+void TypeChecker::count_writers(const LdAst &ast)
+{
+  auto write = [this](const std::string &var) {
+    if (!var.empty())
+      ++writers_[var];
+  };
+  for (const auto &net : ast.networks)
+    for (const auto &rung : net.rungs)
+      for (const auto &elem : rung.elements)
+        switch (elem.kind)
+        {
+        case RungElementKind::Coil:
+          write(elem.coil.variable);
+          break;
+        case RungElementKind::TimerFB:
+          write(elem.timer_fb.Q_var);
+          write(elem.timer_fb.ET_var);
+          break;
+        case RungElementKind::CounterFB:
+          write(elem.counter_fb.Q_var);
+          write(elem.counter_fb.CV_var);
+          break;
+        case RungElementKind::ArithFB:
+          write(elem.arith_fb.OUT_var);
+          break;
+        case RungElementKind::Contact:
+          break;
+        }
+  for (const auto &inst : ast.user_fb_instances)
+    for (const auto &w : inst.out_wires)
+      write(w.prog_var);
 }
 
 // -----------------------------------------------------------------------
@@ -127,6 +189,32 @@ void TypeChecker::check_timer_fb(const TimerFBNode &fb)
 
   require_distinct(fb.instance_name, "IN and Q", fb.IN_var, fb.Q_var, fb.loc);
   require_distinct(fb.instance_name, "PT and ET", fb.PT_var, fb.ET_var, fb.loc);
+
+  check_timer_state(fb);
+}
+
+// The model agrees with MATIEC's timer only for a fixed, non-negative preset
+// and a state that only the block changes and that starts where MATIEC's does.
+void TypeChecker::check_timer_state(const TimerFBNode &fb) const
+{
+  const bool pt_varies = inputs_.count(fb.PT_var) || shared_.count(fb.PT_var) ||
+                         writes(fb.PT_var) > 0;
+  if (pt_varies || init_values_.at(fb.PT_var) < 0)
+    throw TypeCheckError(
+      loc_str(fb.loc) + ": timer '" + fb.instance_name + "' PT '" + fb.PT_var +
+      "' must be a non-negative constant");
+
+  require_sole_writer("timer", fb.instance_name, "ET", fb.ET_var, fb.loc);
+  // A TON recomputes Q and zeroes ET whenever IN is not held, but a TOF or TP
+  // carries both across idle scans, where MATIEC's starts at Q false, ET 0.
+  if (fb.kind != FBKind::TON)
+  {
+    require_sole_writer("timer", fb.instance_name, "Q", fb.Q_var, fb.loc);
+    if (init_values_.at(fb.Q_var) != 0 || init_values_.at(fb.ET_var) != 0)
+      throw TypeCheckError(
+        loc_str(fb.loc) + ": timer '" + fb.instance_name +
+        "' must start with Q false and ET zero");
+  }
 }
 
 void TypeChecker::check_counter_fb(const CounterFBNode &fb)
@@ -172,6 +260,14 @@ void TypeChecker::check_counter_fb(const CounterFBNode &fb)
       loc_str(fb.loc) + ": counter '" + fb.instance_name +
       "' CV port is narrower than PV");
   require_distinct(fb.instance_name, "PV and CV", fb.PV_var, fb.CV_var, fb.loc);
+
+  require_sole_writer("counter", fb.instance_name, "CV", fb.CV_var, fb.loc);
+  // MATIEC's instance starts at CV 0 and overwrites the bound variable on the
+  // first call, so a declared starting count would never be seen.
+  if (init_values_.at(fb.CV_var) != 0)
+    throw TypeCheckError(
+      loc_str(fb.loc) + ": counter '" + fb.instance_name +
+      "' must start with CV zero");
 }
 
 void TypeChecker::check_arith_fb(const ArithFBNode &fb)
@@ -239,6 +335,7 @@ void TypeChecker::check_rung_element(const RungElement &elem)
 void TypeChecker::check(const LdAst &ast)
 {
   build_var_type_map(ast);
+  count_writers(ast);
 
   // Second, independent guard on the vacuity of #7354: the parser's body
   // whitelist is keyed on notation, this catches an empty model however it

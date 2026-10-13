@@ -1,0 +1,5 @@
+CORE
+alarm.ld
+--ld-props props.yaml --unwind 2 --no-unwinding-assertions
+^ERROR: UnsupportedConstruct\(undriven sink alarm, tier=2\)$
+^ERROR: PARSING ERROR$

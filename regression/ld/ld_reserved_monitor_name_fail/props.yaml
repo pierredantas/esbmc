@@ -1,0 +1,8 @@
+properties:
+  - id: r1
+    kind: response
+    trigger: "t"
+    response: "r"
+    max_scans: 1
+    description: "r follows t within one scan"
+    justification: "never holds: r is never set"

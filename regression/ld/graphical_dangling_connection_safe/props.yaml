@@ -1,0 +1,10 @@
+properties:
+
+  # The coil's input also carries a connection to localId 99, which names no
+  # element, and one with no refLocalId. Neither may count as power flow: P1
+  # pins the coil in both directions, so a dangling wire read as powered would
+  # violate the second conjunct.
+  - id: P1
+    kind: invariant
+    expression: "(!alarm || (level_high && !inhibit)) && (alarm || !level_high || inhibit)"
+    description: "Alarm is energised exactly when the level is high and not inhibited"

@@ -23,10 +23,17 @@ public:
 private:
   std::unordered_map<std::string, VarKind> var_types_;
   std::unordered_set<std::string> inputs_;
+  std::unordered_set<std::string> shared_;
+  std::unordered_map<std::string, long long> init_values_;
+  // Number of program elements that assign each variable.
+  std::unordered_map<std::string, int> writers_;
 
   void build_var_type_map(const LdAst &ast);
+  void count_writers(const LdAst &ast);
+  int writes(const std::string &var) const;
   void check_rung_element(const RungElement &elem);
   void check_timer_fb(const TimerFBNode &fb);
+  void check_timer_state(const TimerFBNode &fb) const;
   void check_counter_fb(const CounterFBNode &fb);
   void check_arith_fb(const ArithFBNode &fb);
 
@@ -38,6 +45,12 @@ private:
     const std::string &b,
     const LdLocation &loc) const;
   void require_port(
+    const std::string &instance,
+    const char *port,
+    const std::string &var,
+    const LdLocation &loc) const;
+  void require_sole_writer(
+    const char *block,
     const std::string &instance,
     const char *port,
     const std::string &var,

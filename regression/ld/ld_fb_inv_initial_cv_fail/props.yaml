@@ -1,0 +1,7 @@
+properties:
+  # MATIEC starts the instance at CV 0 and overwrites CVu on the first call,
+  # so a declared starting count of 32767 is refused rather than verified.
+  - id: P1
+    kind: invariant
+    expression: "CUQ"
+    description: "Never checked: the program is refused"

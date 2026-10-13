@@ -1,0 +1,5 @@
+properties:
+  - id: P1
+    kind: invariant
+    expression: "q"
+    description: "Fails on the first scan: the timer has not expired"

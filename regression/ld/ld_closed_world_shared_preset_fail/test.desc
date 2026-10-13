@@ -1,0 +1,4 @@
+CORE
+ton.ld
+--ld-props props.yaml --ld-closed-world --unwind 2 --no-unwinding-assertions
+^VERIFICATION FAILED$

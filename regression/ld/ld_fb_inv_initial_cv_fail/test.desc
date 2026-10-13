@@ -1,4 +1,5 @@
 CORE
 counter.ld
 --ld-props props.yaml --incremental-bmc --overflow-check --ld-fb-invariants
-^VERIFICATION UNKNOWN$
+^ERROR: .*counter 'cu1' must start with CV zero$
+^ERROR: PARSING ERROR$

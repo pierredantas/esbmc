@@ -1,0 +1,8 @@
+properties:
+
+  # The coil's only connections are dangling (localId 99 names no element, and
+  # one has no refLocalId), so nothing drives it and the parse must refuse it.
+  - id: P1
+    kind: invariant
+    expression: "!alarm || level_high"
+    description: "Alarm only with the level high"
