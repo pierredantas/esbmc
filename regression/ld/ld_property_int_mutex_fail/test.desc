@@ -1,0 +1,4 @@
+CORE
+cnt.ld
+--ld-props props.yaml --unwind 2 --no-unwinding-assertions
+^ERROR: property 'P1': variable 'Cnt' is not BOOL$

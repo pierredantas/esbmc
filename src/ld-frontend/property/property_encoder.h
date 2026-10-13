@@ -17,7 +17,8 @@ public:
   property_encoder(contextt &context, const std::string &source_file);
 
   // Encode all properties and return a code_blockt of assertions.
-  // Throws std::runtime_error if a property references an undeclared variable.
+  // Throws std::runtime_error if a property references an undeclared variable
+  // or uses a variable that is not BOOL as an atom.
   code_blockt encode(const std::vector<LdProperty> &props);
 
   // EXPERIMENT (--ld-monitor-invariants): the program the response monitors may
@@ -58,6 +59,7 @@ private:
   std::vector<exprt> monitor_facts_;
 
   symbol_exprt var_expr(const std::string &name, const LdProperty &p) const;
+  symbol_exprt bool_var(const std::string &name, const LdProperty &p) const;
   exprt parse_bool_expr(const std::string &expr_str, const LdProperty &p) const;
 
   code_assertt make_assert(const exprt &cond, const LdProperty &p) const;

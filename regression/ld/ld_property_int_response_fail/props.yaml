@@ -1,0 +1,8 @@
+properties:
+  - id: P1
+    kind: response
+    trigger: "Cnt"
+    response: "y"
+    max_scans: 1
+    description: "Was triggered by Cnt != 0"
+    justification: "an INT trigger is refused"

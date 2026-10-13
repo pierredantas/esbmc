@@ -2641,3 +2641,7 @@ regression/ld/ld_timer_preset_written_fail
 regression/ld/ld_tof_et_starts_nonzero_fail
 regression/ld/graphical_counter_reset_cycle_fail
 regression/ld/graphical_counter_cross_cycle_fail
+regression/ld/ld_property_int_atom_fail
+regression/ld/ld_property_int_negation_fail
+regression/ld/ld_property_int_mutex_fail
+regression/ld/ld_property_int_response_fail
