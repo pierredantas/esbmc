@@ -32,6 +32,18 @@ property_encoder::var_expr(const std::string &name, const LdProperty &p) const
   return symbol_exprt(ld_name(name), sym->get_type());
 }
 
+// A property is a Boolean expression over its atoms; a numeric atom would be
+// read as nonzero, and its negation reaches the solver as a type error.
+symbol_exprt
+property_encoder::bool_var(const std::string &name, const LdProperty &p) const
+{
+  symbol_exprt v = var_expr(name, p);
+  if (!v.type().is_bool())
+    throw std::runtime_error(
+      "property '" + p.id + "': variable '" + name + "' is not BOOL");
+  return v;
+}
+
 // Find the leftmost occurrence of 'op' at parenthesis depth 0.
 static size_t find_outermost_op(const std::string &s, const std::string &op)
 {
@@ -110,7 +122,7 @@ exprt property_encoder::parse_bool_expr(
   if (s.front() == '!')
     return not_exprt(parse_bool_expr(s.substr(1), p));
 
-  return var_expr(s, p);
+  return bool_var(s, p);
 }
 
 code_assertt
@@ -134,7 +146,7 @@ code_blockt property_encoder::encode_mutual_exclusion(const LdProperty &p)
     for (size_t j = i + 1; j < p.variables.size(); ++j)
       together = or_exprt(
         together,
-        and_exprt(var_expr(p.variables[i], p), var_expr(p.variables[j], p)));
+        and_exprt(bool_var(p.variables[i], p), bool_var(p.variables[j], p)));
 
   code_blockt blk;
   blk.copy_to_operands(make_assert(not_exprt(together), p));
@@ -201,8 +213,8 @@ code_blockt property_encoder::encode_response(const LdProperty &p)
   }
 
   symbol_exprt ctr(ctr_name, int_type());
-  symbol_exprt trigger = var_expr(p.trigger, p);
-  symbol_exprt response = var_expr(p.response_var, p);
+  symbol_exprt trigger = bool_var(p.trigger, p);
+  symbol_exprt response = bool_var(p.response_var, p);
   exprt limit =
     from_integer(BigInt(p.deadline_in_ms ? p.max_ms : p.max_scans), int_type());
   exprt one = gen_one(int_type());
