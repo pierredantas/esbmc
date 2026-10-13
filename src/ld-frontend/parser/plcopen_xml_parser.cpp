@@ -1251,11 +1251,19 @@ static bool parse_graphical_ld(
   // Emit a function block: first the rungs driving its enable pin, then the
   // FB step itself.  Blocks feeding this one are emitted first so that their
   // output pins are already assigned when this block reads them.
+  std::function<void(int)> step_block;
   std::set<int> emitted_blocks;
+  // A block stays in progress while its pins are resolved, so a wire from its
+  // own output back into its R or LD pin is refused as a cycle even when the
+  // block is reached from the trailing loop rather than from ensure_pf.
   emit_block = [&](int block_id) {
     if (!emitted_blocks.insert(block_id).second)
       return;
-
+    pf_in_progress.insert(block_id);
+    step_block(block_id);
+    pf_in_progress.erase(block_id);
+  };
+  step_block = [&](int block_id) {
     const GNode &g = nodes.at(block_id);
     for (int p : live_preds(block_id))
       ensure_pf(p);
