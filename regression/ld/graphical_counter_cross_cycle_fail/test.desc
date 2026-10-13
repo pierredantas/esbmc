@@ -1,0 +1,4 @@
+CORE
+cycle.ld
+--ld-props props.yaml --unwind 3 --no-unwinding-assertions
+^ERROR: .*power flow into localId 3 is cyclic$

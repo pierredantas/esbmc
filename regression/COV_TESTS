@@ -2639,3 +2639,5 @@ regression/ld/graphical_dangling_connection_safe
 regression/ld/graphical_dangling_connection_fail
 regression/ld/ld_timer_preset_written_fail
 regression/ld/ld_tof_et_starts_nonzero_fail
+regression/ld/graphical_counter_reset_cycle_fail
+regression/ld/graphical_counter_cross_cycle_fail
